@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -20,7 +20,7 @@ const AIRBAGS = ["Driver steering wheel", "Passenger dashboard", "Driver side se
 const EQUIPMENT = ["Air conditioning", "Sunroof"];
 const BROKEN = ["Engine", "Transmission", "Transfer case", "Dashboard"];
 const MISSING = ["Radio", "Catalyst"];
-const PROGI_MIN_PHOTOS = 10;
+const PROGI_MIN_PHOTOS = 12;
 const VPIC = "https://vpic.nhtsa.dot.gov/api/vehicles/";
 const MAKES_RAW = ["Acura","Alfa Romeo","Audi","BMW","Buick","Cadillac","Chevrolet","Chrysler","Dodge","Fiat","Ford","Genesis","GMC","Honda","Hyundai","Infiniti","Jaguar","Jeep","Kia","Land Rover","Lexus","Lincoln","Mazda","Mercedes-Benz","Mini","Mitsubishi","Nissan","Polestar","Pontiac","Porsche","Ram","Saturn","Smart","Subaru","Suzuki","Tesla","Toyota","Volkswagen","Volvo","Harley-Davidson","Yamaha","Kawasaki","Freightliner","International","Hino","Isuzu","Scion","Mercury","Oldsmobile","Hummer","Maserati","Bentley","Land Rover","Rivian"];
 const MAKES = [...new Set(MAKES_RAW)].sort((a, b) => a.localeCompare(b));
@@ -696,6 +696,7 @@ function renderForm(existing, opts = {}) {
     </details>
 
     <div class="field"><span>Vehicle Photos <em class="muted" id="photoCount"></em></span>
+      <em class="hint">4 corners · damage close-up · inside (passenger door open) · engine (if hood opens) · VIN · keys · odometer (if it turns on)</em>
       <div id="photoGrid" class="photos"></div>
       <div class="btnrow">
         <label class="btn filebtn">📷 Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
@@ -726,7 +727,7 @@ function renderForm(existing, opts = {}) {
     $("#paidBox").hidden = f.paid !== true;
     $("#last4Box").hidden = f.payment_type !== "credit_card";
     $("#chequeBox").hidden = f.payment_type !== "cheque";
-    $("#speedsBox").hidden = f.transmission !== "Manual";
+    $("#speedsBox").hidden = !f.transmission;
   };
   $$("[data-chips]", form).forEach((g) => {
     g.onclick = (e) => {
@@ -938,7 +939,7 @@ function renderForm(existing, opts = {}) {
       photos.map((p, i) => `<div class="ph"><img src="${p.url}" alt=""><button type="button" class="x" data-rmph="${i}">×</button></div>`).join("");
     if (ex.length) loadThumbs($("#photoGrid"));
     const n = ex.length + photos.length, pc = $("#photoCount");
-    if (pc) { pc.textContent = `${n}/${PROGI_MIN_PHOTOS} for Progi · first photo = main`; pc.classList.toggle("okc", n >= PROGI_MIN_PHOTOS); }
+    if (pc) { pc.textContent = `${n}/${PROGI_MIN_PHOTOS} for Progi`; pc.classList.toggle("okc", n >= PROGI_MIN_PHOTOS); }
   };
   $("#photoGrid").onclick = (e) => {
     const a = e.target.closest("[data-rmph]"), b = e.target.closest("[data-rmex]");
@@ -1006,7 +1007,7 @@ function renderForm(existing, opts = {}) {
       burned: !!f.burned,
       vehicle_specs: f.vehicle_specs,
       transmission: f.transmission || null,
-      transmission_speeds: f.transmission === "Manual" && f.transmission_speeds ? +f.transmission_speeds : f.transmission === "Automatic" && f.vehicle_specs?.speeds ? +f.vehicle_specs.speeds || null : null,
+      transmission_speeds: f.transmission && f.transmission_speeds ? +f.transmission_speeds : null,
       odometer: f.odometer_unreadable || f.odometer === "" ? null : +f.odometer,
       odometer_unit: f.odometer_unit,
       odometer_unreadable: !!f.odometer_unreadable,
