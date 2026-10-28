@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.7.2";
+const VERSION = "1.7.3";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -13,7 +13,10 @@ const PAY_TYPES = [
 const PAY_LABEL = Object.fromEntries(PAY_TYPES);
 const EXTRAS = [["D", "Dry run"], ["HT", "Heavy tow"], ["L", "Labor"], ["T", "Retow"], ["O", "Other fee"]];
 const DRIVES = ["FWD", "RWD", "AWD", "4WD"];
-const COLORS = ["White", "Black", "Grey", "Silver", "Blue", "Red", "Brown / Beige", "Green", "Gold / Yellow", "Orange", "Purple", "Other", "Unknown"];
+// most common car colours first; swatch shown on each button
+const COLORS = [["White", "#ffffff"], ["Black", "#111111"], ["Grey", "#7b8189"], ["Silver", "#c9ced6"], ["Blue", "#2f6fd6"],
+  ["Dark Blue", "#1d2f5e"], ["Red", "#d32f2f"], ["Burgundy", "#7a1f2b"], ["Green", "#2e7d32"], ["Brown", "#6d4c33"],
+  ["Beige", "#d8c7a3"], ["Gold", "#c9a227"], ["Yellow", "#f2d230"], ["Orange", "#ef7d1a"], ["Purple", "#6a3d9a"], ["Other", ""]];
 const OTHER = "__other";
 // Progi "Vehicle" section
 const AIRBAGS = ["Driver steering wheel", "Passenger dashboard", "Driver side seat", "Passenger side seat", "Driver knees", "Passenger knees", "Driver curtain", "Passenger curtain", "Rear left seat side", "Rear right seat side"];
@@ -619,11 +622,12 @@ function renderForm(existing, opts = {}) {
     <em class="hint" id="modelHint"></em>
 
     <div class="row2">
-      <label class="field"><span>Colour *</span><select name="color" id="selColor">
-        <option value="">Pick colour</option>${COLORS.map((c) => `<option value="${c}">${c}</option>`).join("")}</select></label>
       <div class="field"><span>Burned?</span>
         <div class="chips two" data-chips="burned"><button type="button" data-val="false">No</button><button type="button" data-val="true">🔥 Yes</button></div></div>
     </div>
+    <div class="field"><span>Colour *</span>
+      <div class="chips colors" data-chips="color">${[...COLORS, ...(f.color && !COLORS.some(([c]) => c === f.color) ? [[f.color, ""]] : [])]
+        .map(([c, hex]) => `<button type="button" data-val="${esc(c)}">${hex ? `<i class="sw" style="background:${hex}"></i>` : ""}${esc(c)}</button>`).join("")}</div></div>
 
     <div class="field"><span>Drive</span>
       <div class="chips" data-chips="drive_type">${DRIVES.map((t) => `<button type="button" data-val="${t}">${t}</button>`).join("")}</div></div>
@@ -828,8 +832,6 @@ function renderForm(existing, opts = {}) {
     makeIn.value = f.make; modelIn.value = f.model;
     renderYears(); renderMakes(); fillModels();
   };
-  $("#selColor").value = f.color;
-  $("#selColor").onchange = (e) => { f.color = e.target.value; clearBad(e.target); };
 
   // VIN decode
   const runDecode = async () => {
@@ -1100,7 +1102,6 @@ async function loadThumbs(root) {
     const n = nodes[i];
     const img = document.createElement("img");
     img.src = d.signedUrl; img.alt = "";
-    img.onclick = () => window.open(d.signedUrl, "_blank");
     n.querySelector(".phload")?.replaceWith(img);
   });
 }
