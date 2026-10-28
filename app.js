@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -79,7 +79,8 @@ function mapDrive(d) {
   if (d.startsWith("AWD") || d.includes("ALL-WHEEL") || d.includes("ALL WHEEL")) return "AWD";
   if (d.startsWith("4WD") || d.includes("4X4") || d.includes("4-WHEEL") || d.includes("4WD")) return "4WD";
   if (d.startsWith("FWD") || d.includes("FRONT")) return "FWD";
-  if (d.startsWith("RWD") || d.includes("REAR") || d.includes("4X2")) return "RWD";
+  if (d.startsWith("RWD") || d.includes("REAR")) return "RWD";
+  if (d.includes("4X2") || d.includes("2WD")) return "2WD"; // front or rear not stated: driver picks
   return "";
 }
 function mapType(vt, body) {
@@ -97,7 +98,7 @@ async function decodeVin(vin) {
   if (!r.Make && !r.Model) throw new Error("No vehicle found for this VIN — check it for typos");
   return {
     year: r.ModelYear || "", make: titleMake(r.Make), model: (r.Model || "").trim(),
-    drive_type: mapDrive(r.DriveType), vehicle_type: mapType(r.VehicleType, r.BodyClass),
+    drive_raw: mapDrive(r.DriveType), vehicle_type: mapType(r.VehicleType, r.BodyClass),
     body: r.BodyClass || "", trim: r.Trim || "",
   };
 }
@@ -708,11 +709,11 @@ function renderForm(existing, opts = {}) {
       if (d.year) f.year = String(d.year);
       if (d.make) f.make = d.make;
       if (d.model) f.model = d.model;
-      if (d.drive_type) f.drive_type = d.drive_type;
+      if (DRIVES.includes(d.drive_raw)) f.drive_type = d.drive_raw;
       if (d.vehicle_type) f.vehicle_type = d.vehicle_type;
       setChips(); syncVehicle();
       [selYear, selMake, selModel].forEach(clearBad);
-      msg.textContent = `✓ ${[d.year, d.make, d.model, d.trim].filter(Boolean).join(" ")}${d.body ? " · " + d.body.split("/")[0].trim() : ""}${d.drive_type ? " · " + d.drive_type : " · drive not listed"}`
+      msg.textContent = `✓ ${[d.year, d.make, d.model, d.trim].filter(Boolean).join(" ")}${d.body ? " · " + d.body.split("/")[0].trim() : ""}${d.drive_raw === "2WD" ? " · 2WD — tap FWD or RWD below" : d.drive_raw ? " · " + d.drive_raw : " · drive not listed"}`
         + (vinCheckOk(vin) ? "" : " — check digit doesn't match, double-check the VIN");
       msg.className = "hint ok";
     } catch (err) {
