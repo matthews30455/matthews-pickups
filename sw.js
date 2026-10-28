@@ -1,6 +1,6 @@
 // Offline support: keeps the app shell and libraries on the phone.
 // Database / file traffic (supabase.co) is never cached.
-const CACHE = "mp-v1.10.1";
+const CACHE = "mp-v1.10.2";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./config.js", "./queue.js", "./scan.js",
   "./manifest.webmanifest", "./icon-192.png", "./apple-touch-icon.png"];
 const LIBS = [
@@ -32,7 +32,8 @@ self.addEventListener("fetch", (e) => {
 
   if (url.origin === location.origin) {
     // app files: network first (get updates), fall back to cache when offline
-    e.respondWith(fetch(req).then((res) => {
+    // no-cache = always ask the server if the file changed (so a new version shows up without a hard refresh)
+    e.respondWith(fetch(req.url, { cache: "no-cache", credentials: "same-origin" }).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req).then((r) => r || caches.match("./index.html"))));
