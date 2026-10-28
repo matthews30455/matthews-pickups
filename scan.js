@@ -1,18 +1,45 @@
 // Image helpers: vehicle photo compression, invoice "scan" look, and PDF building.
 
+let heicPromise;
+function loadHeic2any() {
+  if (window.heic2any) return Promise.resolve(window.heic2any);
+  heicPromise ||= new Promise((resolve, reject) => {
+    const sc = document.createElement("script");
+    sc.src = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
+    sc.onload = () => (window.heic2any ? resolve(window.heic2any) : reject(new Error("HEIC converter didn't load")));
+    sc.onerror = () => { heicPromise = null; reject(new Error("HEIC converter needs internet")); };
+    document.head.appendChild(sc);
+  });
+  return heicPromise;
+}
+export const isHeic = (file) => /hei[cf]/i.test(file.type || "") || /\.(heic|heif)$/i.test(file.name || "");
+async function decodeBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  try { const img = new Image(); img.decoding = "async"; img.src = url; await img.decode(); return img; }
+  finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+}
+/** Opens any photo, including iPhone HEIC on computers whose browser can't read HEIC (converted to JPEG first). */
 export async function loadImage(file) {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.decoding = "async";
-    img.src = url;
-    await img.decode(); // browsers apply the photo's EXIF rotation; iPhone HEIC decodes in Safari
-    return img;
-  } catch {
-    throw new Error("This picture format can't be opened on this phone. Try taking the photo again.");
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try { return await decodeBlob(file); }                 // Safari reads HEIC itself; JPEG/PNG everywhere
+  catch { /* try HEIC conversion */ }
+  if (isHeic(file) || !file.type) {
+    try {
+      const h = await loadHeic2any();
+      let out = await h({ blob: file, toType: "image/jpeg", quality: 0.9 });
+      if (Array.isArray(out)) out = out[0];
+      return await decodeBlob(out);
+    } catch { /* fall through */ }
   }
+  throw new Error("This picture format can't be opened. Try a JPG/PNG, or take the photo again.");
+}
+
+/** Any picture → one-page canvas (no scan filter); used for a pickup sheet photo */
+export async function plainCanvas(file, maxSide = 1700) {
+  const img = await loadImage(file);
+  const [w, h] = fit(img.naturalWidth, img.naturalHeight, maxSide);
+  const c = canvasOf(w, h);
+  const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, w, h); x.drawImage(img, 0, 0, w, h);
+  return c;
 }
 
 function fit(w, h, max) {

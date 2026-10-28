@@ -1,9 +1,9 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, LOGIN_DOMAIN } from "./config.js";
 import { outbox } from "./queue.js";
-import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
+import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.6.1";
+const VERSION = "1.7.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -159,7 +159,7 @@ async function aiReadVin(canvas) {
   if (r?.error) throw new Error(r.error);
   return r?.list || [];
 }
-async function loadPhoto(file) { const url = URL.createObjectURL(file); try { const i = new Image(); i.src = url; await i.decode(); return i; } finally { setTimeout(() => URL.revokeObjectURL(url), 2000); } }
+const loadPhoto = (file) => loadImage(file);
 function rot90(c) { const r = document.createElement("canvas"); r.width = c.height; r.height = c.width; const x = r.getContext("2d"); x.translate(r.width, 0); x.rotate(Math.PI / 2); x.drawImage(c, 0, 0); return r; }
 
 /** Opens a full-screen camera scanner. Resolves with a VIN, or "" if cancelled. */
@@ -651,7 +651,7 @@ function renderForm(existing, opts = {}) {
         <div id="pages" class="pages"></div>
         <div class="btnrow">
           <label class="btn big dark filebtn">📄 <span id="scanLbl">Scan Invoice</span><input type="file" accept="image/*" capture="environment" id="scanIn" hidden></label>
-          <label class="btn ghost filebtn">Use PDF<input type="file" accept="application/pdf" id="pdfIn" hidden></label>
+          <label class="btn ghost filebtn">Upload file (PDF / photo)<input type="file" accept="application/pdf,image/*,.heic,.heif" id="pdfIn" hidden></label>
         </div>
         <em class="hint">Lay the invoice flat, fill the screen, take one photo per page.</em>
       </div>
@@ -727,7 +727,7 @@ function renderForm(existing, opts = {}) {
     $("#paidBox").hidden = f.paid !== true;
     $("#last4Box").hidden = f.payment_type !== "credit_card";
     $("#chequeBox").hidden = f.payment_type !== "cheque";
-    $("#speedsBox").hidden = !f.transmission;
+    $("#speedsBox").hidden = f.transmission !== "Manual";
   };
   $$("[data-chips]", form).forEach((g) => {
     g.onclick = (e) => {
@@ -924,11 +924,21 @@ function renderForm(existing, opts = {}) {
     } catch (err) { toast(err.message, "err"); }
     renderPages();
   };
-  $("#pdfIn").onchange = (e) => {
-    const file = e.target.files[0]; e.target.value = "";
-    if (!file) return;
-    if (file.size > 15 * 1024 * 1024) return toast("PDF is too big (max 15 MB)", "err");
-    pages.length = 0; pdfFile = file; renderPages();
+  $("#pdfIn").multiple = true;
+  $("#pdfIn").onchange = async (e) => {
+    const files = [...e.target.files]; e.target.value = "";
+    if (!files.length) return;
+    const pdf = files.find((x) => x.type === "application/pdf" || /\.pdf$/i.test(x.name));
+    if (pdf) {
+      if (pdf.size > 15 * 1024 * 1024) return toast("PDF is too big (max 15 MB)", "err");
+      pages.length = 0; pdfFile = pdf; renderPages(); return;
+    }
+    pdfFile = null; $("#scanLbl").textContent = "Processing…";      // photos of the invoice (JPG, PNG, HEIC)
+    for (const file of files) {
+      try { const src = await scanInvoice(file); pages.push({ src, rot: 0, canvas: src, thumb: thumb(src) }); }
+      catch (err) { toast(err.message, "err"); }
+    }
+    renderPages();
   };
 
   // photos
@@ -1007,7 +1017,7 @@ function renderForm(existing, opts = {}) {
       burned: !!f.burned,
       vehicle_specs: f.vehicle_specs,
       transmission: f.transmission || null,
-      transmission_speeds: f.transmission && f.transmission_speeds ? +f.transmission_speeds : null,
+      transmission_speeds: f.transmission === "Manual" && f.transmission_speeds ? +f.transmission_speeds : null,
       odometer: f.odometer_unreadable || f.odometer === "" ? null : +f.odometer,
       odometer_unit: f.odometer_unit,
       odometer_unreadable: !!f.odometer_unreadable,
