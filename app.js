@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -488,6 +488,8 @@ function renderForm(existing, opts = {}) {
     hst_included: existing ? existing.hst_included !== false : true,
     payment_type: existing?.payment_type || "",
     card_last4: existing?.card_last4 || "",
+    cheque_number: existing?.cheque_number || "",
+    cheque_date: existing?.cheque_date || dayKey(new Date()),
     extras: [...(existing?.extras || [])],
     notes: existing?.notes || "",
   };
@@ -550,6 +552,10 @@ function renderForm(existing, opts = {}) {
       <div class="field"><span>Payment Type *</span>
         <div class="chips" data-chips="payment_type">${PAY_TYPES.map(([v, l]) => `<button type="button" data-val="${v}">${l}</button>`).join("")}</div></div>
       <label class="field" id="last4Box"><span>Card last 4 digits</span><input name="card_last4" inputmode="numeric" maxlength="4" placeholder="1234" value="${esc(f.card_last4)}"></label>
+      <div class="row2" id="chequeBox">
+        <label class="field"><span>Cheque # *</span><input name="cheque_number" inputmode="numeric" maxlength="20" placeholder="001234" value="${esc(f.cheque_number)}"></label>
+        <label class="field"><span>Cheque date *</span><input name="cheque_date" type="date" value="${esc(f.cheque_date)}"></label>
+      </div>
 
       <div class="field"><span>Shop Invoice ${edit ? "" : "*"}</span>
         <div id="invExisting"></div>
@@ -595,6 +601,7 @@ function renderForm(existing, opts = {}) {
     });
     $("#paidBox").hidden = f.paid !== true;
     $("#last4Box").hidden = f.payment_type !== "credit_card";
+    $("#chequeBox").hidden = f.payment_type !== "cheque";
   };
   $$("[data-chips]", form).forEach((g) => {
     g.onclick = (e) => {
@@ -840,6 +847,10 @@ function renderForm(existing, opts = {}) {
       if (!hasInv && !edit) errs.push(["scanIn", "Scan the shop invoice"]);
     }
     if (f.card_last4 && !/^\d{4}$/.test(f.card_last4)) errs.push(["card_last4", "Card: exactly 4 digits"]);
+    if (f.paid && f.payment_type === "cheque") {
+      if (!f.cheque_number.trim()) errs.push(["cheque_number", "Enter the cheque number"]);
+      if (!f.cheque_date) errs.push(["cheque_date", "Pick the cheque date"]);
+    }
     $$(".bad", form).forEach((x) => x.classList.remove("bad"));
     if (errs.length) {
       $("#formErr").textContent = errs.map((x) => x[1]).join(" · ");
@@ -867,6 +878,8 @@ function renderForm(existing, opts = {}) {
       hst_included: f.paid ? !!f.hst_included : null,
       payment_type: f.paid ? f.payment_type : null,
       card_last4: f.paid && f.payment_type === "credit_card" && f.card_last4 ? f.card_last4 : null,
+      cheque_number: f.paid && f.payment_type === "cheque" ? f.cheque_number.trim() : null,
+      cheque_date: f.paid && f.payment_type === "cheque" ? f.cheque_date : null,
       extras: f.extras,
       notes: f.notes.trim() || null,
     };
@@ -1029,7 +1042,7 @@ async function loadList() {
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
         <td>${whenLabel(p.picked_up_at)}</td>
-        <td class="r">${p.paid ? `<b>${money(p.amount)}</b><small class="muted block">${PAY_LABEL[p.payment_type]}</small>` : `<span class="muted">—</span>`}</td>
+        <td class="r">${p.paid ? `<b>${money(p.amount)}</b><small class="muted block">${PAY_LABEL[p.payment_type]}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}</small>` : `<span class="muted">—</span>`}</td>
         <td>${progiPill(p)}</td>
         <td class="nowrap">${p.invoice_path ? "📄" : p.paid ? `<span title="No invoice" class="warnc">!</span>` : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</td>
       </tr>`).join("")}</tbody>
@@ -1041,12 +1054,12 @@ async function loadList() {
 function exportCsv() {
   const rows = S.list;
   if (!rows.length) return toast("Nothing to export", "err");
-  const cols = ["file_number", "pickup_date", "pickup_time", "driver", "vin", "vehicle_type", "year", "make", "model", "drive", "colour", "burned", "shop", "paid", "amount", "hst_included", "payment_type", "card_last4", "extras", "progi_status", "progi_submitted", "quickbooks", "invoice_pdf", "photos", "notes"];
+  const cols = ["file_number", "pickup_date", "pickup_time", "driver", "vin", "vehicle_type", "year", "make", "model", "drive", "colour", "burned", "shop", "paid", "amount", "hst_included", "payment_type", "card_last4", "cheque_number", "cheque_date", "extras", "progi_status", "progi_submitted", "quickbooks", "invoice_pdf", "photos", "notes"];
   const cell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [cols.join(",")].concat(rows.map((p) => [
     p.file_number, dayKey(p.picked_up_at), fmtTime.format(new Date(p.picked_up_at)), driverName(p.driver_id), p.vin, p.vehicle_type, p.year, p.make, p.model, p.drive_type, p.color, p.burned ? "yes" : "no",
     p.shop_name, p.paid ? "yes" : "no", p.paid ? Number(p.amount).toFixed(2) : "", p.paid ? (p.hst_included ? "incl" : "plus") : "",
-    PAY_LABEL[p.payment_type] || "", p.card_last4, (p.extras || []).join(" "), p.progi_status,
+    PAY_LABEL[p.payment_type] || "", p.card_last4, p.cheque_number, p.cheque_date, (p.extras || []).join(" "), p.progi_status,
     p.progi_submitted_at ? dayKey(p.progi_submitted_at) : "", p.qb_status, p.invoice_path ? "yes" : "no", (p.photo_paths || []).length, p.notes,
   ].map(cell).join(",")));
   const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" });
@@ -1084,7 +1097,7 @@ async function renderDetail(id) {
       ${p.vin ? `<div class="mono small">VIN ${esc(p.vin)}</div>` : ""}
       <div class="muted small">Picked up ${whenLabel(p.picked_up_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
       <div class="kv">
-        <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}</span>` : ""}</div>
+        <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
       </div>
       ${p.notes ? `<p class="note">${esc(p.notes)}</p>` : ""}
