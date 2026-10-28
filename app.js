@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -15,6 +15,12 @@ const EXTRAS = [["D", "Dry run"], ["HT", "Heavy tow"], ["L", "Labor"], ["T", "Re
 const DRIVES = ["FWD", "RWD", "AWD", "4WD"];
 const COLORS = ["White", "Black", "Grey", "Silver", "Blue", "Red", "Brown / Beige", "Green", "Gold / Yellow", "Orange", "Purple", "Other", "Unknown"];
 const OTHER = "__other";
+// Progi "Vehicle" section
+const AIRBAGS = ["Driver steering wheel", "Passenger dashboard", "Driver side seat", "Passenger side seat", "Driver knees", "Passenger knees", "Driver curtain", "Passenger curtain", "Rear left seat side", "Rear right seat side"];
+const EQUIPMENT = ["Air conditioning", "Sunroof"];
+const BROKEN = ["Engine", "Transmission", "Transfer case", "Dashboard"];
+const MISSING = ["Radio", "Catalyst"];
+const PROGI_MIN_PHOTOS = 10;
 const VPIC = "https://vpic.nhtsa.dot.gov/api/vehicles/";
 const MAKES_RAW = ["Acura","Alfa Romeo","Audi","BMW","Buick","Cadillac","Chevrolet","Chrysler","Dodge","Fiat","Ford","Genesis","GMC","Honda","Hyundai","Infiniti","Jaguar","Jeep","Kia","Land Rover","Lexus","Lincoln","Mazda","Mercedes-Benz","Mini","Mitsubishi","Nissan","Polestar","Pontiac","Porsche","Ram","Saturn","Smart","Subaru","Suzuki","Tesla","Toyota","Volkswagen","Volvo","Harley-Davidson","Yamaha","Kawasaki","Freightliner","International","Hino","Isuzu","Scion","Mercury","Oldsmobile","Hummer","Maserati","Bentley","Land Rover","Rivian"];
 const MAKES = [...new Set(MAKES_RAW)].sort((a, b) => a.localeCompare(b));
@@ -100,6 +106,12 @@ async function decodeVin(vin) {
     year: r.ModelYear || "", make: titleMake(r.Make), model: (r.Model || "").trim(),
     drive_raw: mapDrive(r.DriveType), vehicle_type: mapType(r.VehicleType, r.BodyClass),
     body: r.BodyClass || "", trim: r.Trim || "",
+    transmission: /manual/i.test(r.TransmissionStyle || "") ? "Manual" : /auto|cvt|dual/i.test(r.TransmissionStyle || "") ? "Automatic" : "",
+    specs: {
+      trim: [r.Trim, r.Series].filter(Boolean).join(" "), body: r.BodyClass || "", fuel: r.FuelTypePrimary || "",
+      liters: r.DisplacementL ? (+r.DisplacementL).toFixed(1) : "", cylinders: r.EngineCylinders || "",
+      transmission: r.TransmissionStyle || "", speeds: r.TransmissionSpeeds || "", turbo: r.Turbo || "", drive: r.DriveType || "",
+    },
   };
 }
 async function modelsFor(make, year) {
@@ -320,6 +332,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
   preloadPdf();
   go(isOwner() ? "dash" : "home");
+  if (isOwner()) window.MP = { sb, signedUrl, version: VERSION }; // used when Claude fills Progi from this browser
   syncOutbox();
   if (navigator.onLine) refreshSuggestions();
 }
@@ -542,6 +555,20 @@ function renderForm(existing, opts = {}) {
     model: existing?.model || "",
     color: existing?.color || "",
     burned: existing?.burned || false,
+    vehicle_specs: existing?.vehicle_specs || null,
+    transmission: existing?.transmission || "",
+    odometer: existing?.odometer ?? "",
+    odometer_unit: existing?.odometer_unit || "km",
+    odometer_unreadable: existing?.odometer_unreadable || false,
+    keys_qty: existing?.keys_qty != null ? String(existing.keys_qty) : "",
+    remote_locking: existing?.remote_locking ?? "",
+    wheels_good: existing?.wheels_good != null ? String(existing.wheels_good) : "",
+    airbags: [...(existing?.airbags || [])],
+    equipment: [...(existing?.equipment || [])],
+    broken_parts: [...(existing?.broken_parts || [])],
+    missing_parts: [...(existing?.missing_parts || [])],
+    missing_other: existing?.missing_other || "",
+    windows_open: existing?.windows_open || "",
     shop_name: existing?.shop_name || "",
     paid: existing ? existing.paid : null,
     amount: existing?.amount ?? "",
@@ -631,7 +658,40 @@ function renderForm(existing, opts = {}) {
     <div class="field"><span>Extra charges <em class="muted">(optional)</em></span>
       <div class="chips" data-chips="extras" data-multi>${EXTRAS.map(([v, l]) => `<button type="button" data-val="${v}">${l} <small>${v}</small></button>`).join("")}</div></div>
 
-    <div class="field"><span>Vehicle Photos</span>
+    <details class="cond" id="condBox" ${edit ? "" : "open"}>
+      <summary>Vehicle condition <em class="muted">(for Progi)</em></summary>
+      <div class="stack">
+        <div class="row2">
+          <label class="field"><span>Odometer</span><input name="odometer" inputmode="numeric" maxlength="7" placeholder="123456" value="${esc(f.odometer)}"></label>
+          <div class="field"><span>&nbsp;</span>
+            <div class="chips" data-chips="odometer_unit"><button type="button" data-val="km">km</button><button type="button" data-val="mi">Miles</button></div></div>
+        </div>
+        <div class="chips" data-chips="odometer_unreadable"><button type="button" data-val="true">Can't read odometer</button></div>
+        <div class="field"><span>Transmission</span>
+          <div class="chips two" data-chips="transmission"><button type="button" data-val="Automatic">Automatic</button><button type="button" data-val="Manual">Manual</button></div></div>
+        <div class="row2">
+          <div class="field"><span>Keys</span>
+            <div class="chips" data-chips="keys_qty">${["0", "1", "2", "3"].map((n) => `<button type="button" data-val="${n}">${n === "3" ? "3+" : n}</button>`).join("")}</div></div>
+          <div class="field"><span>Remote / fob</span>
+            <div class="chips two" data-chips="remote_locking"><button type="button" data-val="true">Yes</button><button type="button" data-val="false">No</button></div></div>
+        </div>
+        <div class="field"><span>Wheels in good condition</span>
+          <div class="chips" data-chips="wheels_good">${["0", "1", "2", "3", "4", "5"].map((n) => `<button type="button" data-val="${n}">${n}</button>`).join("")}</div></div>
+        <div class="field"><span>Windows open or broken?</span>
+          <div class="chips" data-chips="windows_open"><button type="button" data-val="yes">Yes</button><button type="button" data-val="no">No</button><button type="button" data-val="unknown">Unknown</button></div></div>
+        <div class="field"><span>Deployed airbags <em class="muted">(tap all that apply)</em></span>
+          <div class="chips small" data-chips="airbags" data-multi>${AIRBAGS.map((a) => `<button type="button" data-val="${a}">${a}</button>`).join("")}</div></div>
+        <div class="field"><span>Equipment</span>
+          <div class="chips small" data-chips="equipment" data-multi>${EQUIPMENT.map((a) => `<button type="button" data-val="${a}">${a}</button>`).join("")}</div></div>
+        <div class="field"><span>Broken parts</span>
+          <div class="chips small" data-chips="broken_parts" data-multi>${BROKEN.map((a) => `<button type="button" data-val="${a}">${a}</button>`).join("")}</div></div>
+        <div class="field"><span>Missing parts</span>
+          <div class="chips small" data-chips="missing_parts" data-multi>${MISSING.map((a) => `<button type="button" data-val="${a}">${a}</button>`).join("")}</div>
+          <input name="missing_other" placeholder="Other missing parts" value="${esc(f.missing_other)}" style="margin-top:8px"></div>
+      </div>
+    </details>
+
+    <div class="field"><span>Vehicle Photos <em class="muted" id="photoCount"></em></span>
       <div id="photoGrid" class="photos"></div>
       <div class="btnrow">
         <label class="btn filebtn">📷 Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
@@ -668,7 +728,7 @@ function renderForm(existing, opts = {}) {
       const b = e.target.closest("button"); if (!b) return;
       const key = g.dataset.chips, v = b.dataset.val;
       if (g.hasAttribute("data-multi")) f[key] = f[key].includes(v) ? f[key].filter((x) => x !== v) : [...f[key], v];
-      else if (key === "drive_type" && f[key] === v) f[key] = "";
+      else if (["drive_type", "odometer_unreadable", "transmission", "remote_locking", "windows_open", "keys_qty", "wheels_good"].includes(key) && String(f[key]) === v) f[key] = key === "odometer_unreadable" ? false : "";
       else f[key] = v === "true" ? true : v === "false" ? false : v;
       setChips();
     };
@@ -685,7 +745,7 @@ function renderForm(existing, opts = {}) {
     let v = e.target.value;
     if (n === "file_number") { v = v.toUpperCase().replace(/\s+/g, ""); e.target.value = v; }
     if (n === "vin") { v = v.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/[IOQ]/g, (c) => ({ I: "1", O: "0", Q: "0" }[c])); e.target.value = v; f.vin = v; if (v.length === 17) runDecode(); else $("#vinMsg").textContent = v ? `${v.length}/17` : ""; }
-    if (n === "year" || n === "card_last4") { v = v.replace(/\D/g, ""); e.target.value = v; }
+    if (n === "year" || n === "card_last4" || n === "odometer") { v = v.replace(/\D/g, ""); e.target.value = v; }
     if (n === "amount") { v = v.replace(/[^\d.]/g, ""); e.target.value = v; }
     f[n] = v;
     if (n === "year") { clearTimeout(modelTimer); modelTimer = setTimeout(fillModels, 400); }
@@ -777,6 +837,8 @@ function renderForm(existing, opts = {}) {
       if (d.make) f.make = d.make;
       if (d.model) f.model = d.model;
       if (DRIVES.includes(d.drive_raw)) f.drive_type = d.drive_raw;
+      if (d.transmission) f.transmission = d.transmission;
+      f.vehicle_specs = d.specs;
       if (d.vehicle_type) f.vehicle_type = d.vehicle_type;
       setChips(); syncVehicle();
       [selYear, selMake, selModel].forEach(clearBad);
@@ -866,6 +928,8 @@ function renderForm(existing, opts = {}) {
       ex.map((p) => `<div class="ph" data-path="${esc(p)}"><div class="phload"></div><button type="button" class="x" data-rmex="${esc(p)}">×</button></div>`).join("") +
       photos.map((p, i) => `<div class="ph"><img src="${p.url}" alt=""><button type="button" class="x" data-rmph="${i}">×</button></div>`).join("");
     if (ex.length) loadThumbs($("#photoGrid"));
+    const n = ex.length + photos.length, pc = $("#photoCount");
+    if (pc) { pc.textContent = `${n}/${PROGI_MIN_PHOTOS} for Progi · first photo = main`; pc.classList.toggle("okc", n >= PROGI_MIN_PHOTOS); }
   };
   $("#photoGrid").onclick = (e) => {
     const a = e.target.closest("[data-rmph]"), b = e.target.closest("[data-rmex]");
@@ -931,6 +995,17 @@ function renderForm(existing, opts = {}) {
       make: titleMake(f.make),
       color: f.color,
       burned: !!f.burned,
+      vehicle_specs: f.vehicle_specs,
+      transmission: f.transmission || null,
+      odometer: f.odometer_unreadable || f.odometer === "" ? null : +f.odometer,
+      odometer_unit: f.odometer_unit,
+      odometer_unreadable: !!f.odometer_unreadable,
+      keys_qty: f.keys_qty === "" ? null : +f.keys_qty,
+      remote_locking: f.remote_locking === "" ? null : f.remote_locking === true || f.remote_locking === "true",
+      wheels_good: f.wheels_good === "" ? null : +f.wheels_good,
+      airbags: f.airbags, equipment: f.equipment, broken_parts: f.broken_parts, missing_parts: f.missing_parts,
+      missing_other: f.missing_other.trim() || null,
+      windows_open: f.windows_open || null,
       model: f.model.trim(),
       shop_name: f.shop_name.trim() || null,
       paid: !!f.paid,
@@ -1114,12 +1189,12 @@ async function loadList() {
 function exportCsv() {
   const rows = S.list;
   if (!rows.length) return toast("Nothing to export", "err");
-  const cols = ["file_number", "pickup_date", "pickup_time", "driver", "vin", "vehicle_type", "year", "make", "model", "drive", "colour", "burned", "shop", "paid", "amount", "hst_included", "payment_type", "card_last4", "cheque_number", "cheque_date", "extras", "progi_status", "progi_submitted", "quickbooks", "invoice_pdf", "photos", "notes"];
+  const cols = ["file_number", "pickup_date", "pickup_time", "driver", "vin", "vehicle_type", "year", "make", "model", "drive", "colour", "burned", "shop", "paid", "amount", "hst_included", "payment_type", "card_last4", "cheque_number", "cheque_date", "odometer", "keys", "remote", "good_wheels", "windows_open", "airbags", "extras", "progi_status", "progi_submitted", "quickbooks", "invoice_pdf", "photos", "notes"];
   const cell = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [cols.join(",")].concat(rows.map((p) => [
     p.file_number, dayKey(p.picked_up_at), fmtTime.format(new Date(p.picked_up_at)), driverName(p.driver_id), p.vin, p.vehicle_type, p.year, p.make, p.model, p.drive_type, p.color, p.burned ? "yes" : "no",
     p.shop_name, p.paid ? "yes" : "no", p.paid ? Number(p.amount).toFixed(2) : "", p.paid ? (p.hst_included ? "incl" : "plus") : "",
-    PAY_LABEL[p.payment_type] || "", p.card_last4, p.cheque_number, p.cheque_date, (p.extras || []).join(" "), p.progi_status,
+    PAY_LABEL[p.payment_type] || "", p.card_last4, p.cheque_number, p.cheque_date, p.odometer_unreadable ? "can't read" : p.odometer != null ? `${p.odometer} ${p.odometer_unit || "km"}` : "", p.keys_qty, p.remote_locking == null ? "" : p.remote_locking ? "yes" : "no", p.wheels_good, p.windows_open, (p.airbags || []).join("; "), (p.extras || []).join(" "), p.progi_status,
     p.progi_submitted_at ? dayKey(p.progi_submitted_at) : "", p.qb_status, p.invoice_path ? "yes" : "no", (p.photo_paths || []).length, p.notes,
   ].map(cell).join(",")));
   const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv" });
@@ -1142,6 +1217,31 @@ async function dailyCleanup() {
 }
 
 // ─────────────────────────────────────────────────────────────── detail
+function condHtml(p) {
+  const bits = [];
+  if (p.odometer_unreadable) bits.push("Odometer: can't read"); else if (p.odometer != null) bits.push(`Odometer: ${Number(p.odometer).toLocaleString("en-CA")} ${p.odometer_unit === "mi" ? "mi" : "km"}`);
+  if (p.transmission) bits.push(p.transmission);
+  if (p.keys_qty != null) bits.push(`Keys: ${p.keys_qty === 3 ? "3+" : p.keys_qty}${p.remote_locking ? " + remote" : p.remote_locking === false ? " (no remote)" : ""}`);
+  if (p.wheels_good != null) bits.push(`Good wheels: ${p.wheels_good}`);
+  if (p.windows_open) bits.push(`Windows open/broken: ${p.windows_open}`);
+  if (p.airbags?.length) bits.push(`Airbags: ${p.airbags.join(", ")}`);
+  if (p.equipment?.length) bits.push(`Equipment: ${p.equipment.join(", ")}`);
+  if (p.broken_parts?.length) bits.push(`Broken: ${p.broken_parts.join(", ")}`);
+  if (p.missing_parts?.length || p.missing_other) bits.push(`Missing: ${[...(p.missing_parts || []), p.missing_other].filter(Boolean).join(", ")}`);
+  const sp = p.vehicle_specs;
+  if (sp) bits.push([sp.trim, sp.liters && sp.liters + "L", sp.cylinders && sp.cylinders + " cyl", sp.fuel].filter(Boolean).join(" · "));
+  return bits.length ? `<ul class="cond-list">${bits.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>` : "";
+}
+function feesHtml(p) {
+  const fa = p.fees_ai;
+  if (!fa) return p.invoice_path ? `<button class="btn sm" id="feesAiBtn">Read invoice amounts (AI)</button>` : "";
+  const row = (l, v) => v == null || v === "" ? "" : `<div><small>${esc(l)}</small><b>${typeof v === "number" ? money(v) : esc(v)}</b></div>`;
+  return `<div class="kv fees">
+    ${row("Towing", fa.towing)}${row("Daily storage", fa.daily_storage)}${row("Storage days", fa.storage_days != null ? String(fa.storage_days) : "")}${row("Total storage", fa.total_storage)}
+    ${(fa.other || []).map((o) => row(o.description || "Other", o.amount)).join("")}
+    ${row("Before tax", fa.subtotal)}${row("HST", fa.tax)}${row("Total", fa.total)}
+  </div>${fa.note ? `<p class="hint">${esc(fa.note)}</p>` : ""}<button class="btn sm ghost" id="feesAiBtn">Read again (AI)</button>`;
+}
 async function renderDetail(id) {
   shell(`<div class="muted">Loading…</div>`, { title: "Pickup", back: () => go(isOwner() ? "dash" : "home") });
   const { data: p, error } = await sb.from("pickups").select("*").eq("id", id).maybeSingle();
@@ -1161,10 +1261,12 @@ async function renderDetail(id) {
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
       </div>
       ${p.notes ? `<p class="note">${esc(p.notes)}</p>` : ""}
+      ${condHtml(p)}
     </section>
 
     <section class="card">
       <h3>Shop invoice</h3>
+      ${isOwner() && p.paid ? feesHtml(p) : ""}
       ${p.invoice_path ? `<div class="btnrow"><button class="btn" id="openPdf">Open PDF</button><button class="btn ghost" id="dlPdf">Download ${esc(p.file_number)}.pdf</button></div>`
         : p.invoice_purged_at ? `<p class="muted">Auto-deleted ${fmtShort.format(new Date(p.invoice_purged_at))}.</p>` : `<p class="muted">${p.paid ? "⚠ No invoice attached." : "No invoice."}</p>`}
       <h3>Photos ${p.photo_paths?.length ? `<span class="muted">(${p.photo_paths.length})</span>` : ""}</h3>
@@ -1200,6 +1302,12 @@ async function renderDetail(id) {
   if (canEdit) renderForm(p, { mount: $("#editMount"), onSaved: () => renderDetail(p.id) });
 
   if (!isOwner()) return;
+  const aiBtn = $("#feesAiBtn");
+  if (aiBtn) aiBtn.onclick = async () => {
+    aiBtn.disabled = true; aiBtn.textContent = "Reading invoice…";
+    try { await adminCall({ action: "invoiceRead", id: p.id }); toast("Invoice read ✓", "ok"); renderDetail(p.id); }
+    catch (e) { toast(e.message, "err"); aiBtn.disabled = false; aiBtn.textContent = "Read invoice amounts (AI)"; }
+  };
   const setField = async (patch, msg) => {
     const { error: e } = await sb.from("pickups").update(patch).eq("id", p.id);
     if (e) return toast(e.message, "err");

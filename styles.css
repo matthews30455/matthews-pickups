@@ -257,3 +257,11 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .vinpicks { display: grid; gap: 8px; width: min(100%, 420px); }
 .vinpicks .btn { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .06em; justify-content: center; }
 .scanov .btnrow { max-width: 520px; }
+
+.cond { border: 1px solid var(--line); border-radius: var(--radius); background: #fff; padding: 12px 14px; }
+.cond summary { font-weight: 700; cursor: pointer; padding: 4px 0; }
+.cond[open] summary { margin-bottom: 12px; }
+.chips.small button { min-height: 40px; padding: 0 12px; font-size: .9rem; }
+.okc { color: var(--green) !important; font-weight: 700; }
+.cond-list { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); display: grid; gap: 2px; }
+.kv.fees { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin-bottom: 8px; }
