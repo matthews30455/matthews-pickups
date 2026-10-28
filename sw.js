@@ -1,6 +1,6 @@
 // Offline support: keeps the app shell and libraries on the phone.
 // Database / file traffic (supabase.co) is never cached.
-const CACHE = "mp-v1.7.0";
+const CACHE = "mp-v1.7.1";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./config.js", "./queue.js", "./scan.js",
   "./manifest.webmanifest", "./icon-192.png", "./apple-touch-icon.png"];
 const LIBS = [
@@ -8,6 +8,7 @@ const LIBS = [
   "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
   "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js",
   "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js",
+  "https://cdn.jsdelivr.net/npm/heic-to@1.6.7/dist/heic-to.js",
 ];
 
 self.addEventListener("install", (e) => {

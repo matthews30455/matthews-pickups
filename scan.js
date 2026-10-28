@@ -1,18 +1,27 @@
 // Image helpers: vehicle photo compression, invoice "scan" look, and PDF building.
 
-let heicPromise;
+// iPhone photos (HEIC) open in Safari but not in Chrome, so they are converted to JPEG here.
+const HEIC_TO = "https://cdn.jsdelivr.net/npm/heic-to@1.6.7/dist/heic-to.js";       // current libheif (newer iPhones)
+const HEIC2ANY = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"; // older fallback
+let heic2anyPromise;
 function loadHeic2any() {
   if (window.heic2any) return Promise.resolve(window.heic2any);
-  heicPromise ||= new Promise((resolve, reject) => {
+  heic2anyPromise ||= new Promise((resolve, reject) => {
     const sc = document.createElement("script");
-    sc.src = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
+    sc.src = HEIC2ANY;
     sc.onload = () => (window.heic2any ? resolve(window.heic2any) : reject(new Error("HEIC converter didn't load")));
-    sc.onerror = () => { heicPromise = null; reject(new Error("HEIC converter needs internet")); };
+    sc.onerror = () => { heic2anyPromise = null; reject(new Error("HEIC converter needs internet")); };
     document.head.appendChild(sc);
   });
-  return heicPromise;
+  return heic2anyPromise;
 }
 export const isHeic = (file) => /hei[cf]/i.test(file.type || "") || /\.(heic|heif)$/i.test(file.name || "");
+async function looksHeic(file) {               // "ftypheic"/"ftypmif1"… in the first bytes, whatever the name says
+  try {
+    const head = new TextDecoder("latin1").decode(await file.slice(4, 12).arrayBuffer());
+    return /^ftyp(hei|hev|mif|msf|avi)/.test(head);
+  } catch { return false; }
+}
 async function decodeBlob(blob) {
   const url = URL.createObjectURL(blob);
   try { const img = new Image(); img.decoding = "async"; img.src = url; await img.decode(); return img; }
@@ -22,13 +31,18 @@ async function decodeBlob(blob) {
 export async function loadImage(file) {
   try { return await decodeBlob(file); }                 // Safari reads HEIC itself; JPEG/PNG everywhere
   catch { /* try HEIC conversion */ }
-  if (isHeic(file) || !file.type) {
+  if (isHeic(file) || await looksHeic(file)) {
+    try {
+      const { heicTo } = await import(HEIC_TO);
+      return await decodeBlob(await heicTo({ blob: file, type: "image/jpeg", quality: 0.9 }));
+    } catch (e) { console.warn("heic-to failed", e); }
     try {
       const h = await loadHeic2any();
       let out = await h({ blob: file, toType: "image/jpeg", quality: 0.9 });
       if (Array.isArray(out)) out = out[0];
       return await decodeBlob(out);
-    } catch { /* fall through */ }
+    } catch (e) { console.warn("heic2any failed", e); }
+    throw new Error("This iPhone photo (HEIC) couldn't be converted. Check the internet, or export it as JPEG.");
   }
   throw new Error("This picture format can't be opened. Try a JPG/PNG, or take the photo again.");
 }
