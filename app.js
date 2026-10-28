@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -304,6 +304,7 @@ const S = {
   view: "home",
   drivers: [],         // owner: all profiles
   suggestions: JSON.parse(localStorage.getItem("mp-sugg") || "[]"),
+  shops: JSON.parse(localStorage.getItem("mp-shops-all") || "[]"),
   filters: { range: "7", driver: "", pay: "", progi: "", q: "" },
   list: [],
   outboxCount: 0,
@@ -557,6 +558,7 @@ function renderForm(existing, opts = {}) {
     burned: existing?.burned || false,
     vehicle_specs: existing?.vehicle_specs || null,
     transmission: existing?.transmission || "",
+    transmission_speeds: existing?.transmission_speeds != null ? String(existing.transmission_speeds) : "",
     odometer: existing?.odometer ?? "",
     odometer_unit: existing?.odometer_unit || "km",
     odometer_unreadable: existing?.odometer_unreadable || false,
@@ -669,6 +671,8 @@ function renderForm(existing, opts = {}) {
         <div class="chips" data-chips="odometer_unreadable"><button type="button" data-val="true">Can't read odometer</button></div>
         <div class="field"><span>Transmission</span>
           <div class="chips two" data-chips="transmission"><button type="button" data-val="Automatic">Automatic</button><button type="button" data-val="Manual">Manual</button></div></div>
+        <div class="field" id="speedsBox"><span>Speeds (gears)</span>
+          <div class="chips" data-chips="transmission_speeds">${["1", "2", "3", "4", "5", "6", "7", "8"].map((n) => `<button type="button" data-val="${n}">${n}</button>`).join("")}</div></div>
         <div class="row2">
           <div class="field"><span>Keys</span>
             <div class="chips" data-chips="keys_qty">${["0", "1", "2", "3"].map((n) => `<button type="button" data-val="${n}">${n === "3" ? "3+" : n}</button>`).join("")}</div></div>
@@ -676,7 +680,7 @@ function renderForm(existing, opts = {}) {
             <div class="chips two" data-chips="remote_locking"><button type="button" data-val="true">Yes</button><button type="button" data-val="false">No</button></div></div>
         </div>
         <div class="field"><span>Wheels in good condition</span>
-          <div class="chips" data-chips="wheels_good">${["0", "1", "2", "3", "4", "5"].map((n) => `<button type="button" data-val="${n}">${n}</button>`).join("")}</div></div>
+          <div class="chips" data-chips="wheels_good">${["0", "1", "2", "3", "4"].map((n) => `<button type="button" data-val="${n}">${n}</button>`).join("")}</div></div>
         <div class="field"><span>Windows open or broken?</span>
           <div class="chips" data-chips="windows_open"><button type="button" data-val="yes">Yes</button><button type="button" data-val="no">No</button><button type="button" data-val="unknown">Unknown</button></div></div>
         <div class="field"><span>Deployed airbags <em class="muted">(tap all that apply)</em></span>
@@ -722,13 +726,14 @@ function renderForm(existing, opts = {}) {
     $("#paidBox").hidden = f.paid !== true;
     $("#last4Box").hidden = f.payment_type !== "credit_card";
     $("#chequeBox").hidden = f.payment_type !== "cheque";
+    $("#speedsBox").hidden = f.transmission !== "Manual";
   };
   $$("[data-chips]", form).forEach((g) => {
     g.onclick = (e) => {
       const b = e.target.closest("button"); if (!b) return;
       const key = g.dataset.chips, v = b.dataset.val;
       if (g.hasAttribute("data-multi")) f[key] = f[key].includes(v) ? f[key].filter((x) => x !== v) : [...f[key], v];
-      else if (["drive_type", "odometer_unreadable", "transmission", "remote_locking", "windows_open", "keys_qty", "wheels_good"].includes(key) && String(f[key]) === v) f[key] = key === "odometer_unreadable" ? false : "";
+      else if (["drive_type", "odometer_unreadable", "transmission", "transmission_speeds", "remote_locking", "windows_open", "keys_qty", "wheels_good"].includes(key) && String(f[key]) === v) f[key] = key === "odometer_unreadable" ? false : "";
       else f[key] = v === "true" ? true : v === "false" ? false : v;
       setChips();
     };
@@ -838,6 +843,7 @@ function renderForm(existing, opts = {}) {
       if (d.model) f.model = d.model;
       if (DRIVES.includes(d.drive_raw)) f.drive_type = d.drive_raw;
       if (d.transmission) f.transmission = d.transmission;
+      if (d.specs?.speeds && +d.specs.speeds >= 1 && +d.specs.speeds <= 8) f.transmission_speeds = String(+d.specs.speeds);
       f.vehicle_specs = d.specs;
       if (d.vehicle_type) f.vehicle_type = d.vehicle_type;
       setChips(); syncVehicle();
@@ -859,7 +865,10 @@ function renderForm(existing, opts = {}) {
   };
   syncVehicle();
   const shops = JSON.parse(localStorage.getItem("mp-shops") || "[]");
-  $("#dlShop").innerHTML = shops.map((m) => `<option value="${esc(m)}">`).join("");
+  const allShops = () => [...new Set([...shops, ...(S.shops || [])])];
+  const fillShops = () => { const dl = $("#dlShop"); if (dl) dl.innerHTML = allShops().map((m) => `<option value="${esc(m)}">`).join(""); };
+  fillShops();
+  if (navigator.onLine && !S.shopsLoaded) sb.rpc("shop_names").then(({ data }) => { if (data) { S.shops = data.map((r) => r.shop_name); S.shopsLoaded = true; try { localStorage.setItem("mp-shops-all", JSON.stringify(S.shops)); } catch { /* full */ } fillShops(); } });
 
   // duplicate file number warning
   const dupCheck = async () => {
@@ -997,6 +1006,7 @@ function renderForm(existing, opts = {}) {
       burned: !!f.burned,
       vehicle_specs: f.vehicle_specs,
       transmission: f.transmission || null,
+      transmission_speeds: f.transmission === "Manual" && f.transmission_speeds ? +f.transmission_speeds : f.transmission === "Automatic" && f.vehicle_specs?.speeds ? +f.vehicle_specs.speeds || null : null,
       odometer: f.odometer_unreadable || f.odometer === "" ? null : +f.odometer,
       odometer_unit: f.odometer_unit,
       odometer_unreadable: !!f.odometer_unreadable,
@@ -1007,7 +1017,7 @@ function renderForm(existing, opts = {}) {
       missing_other: f.missing_other.trim() || null,
       windows_open: f.windows_open || null,
       model: f.model.trim(),
-      shop_name: f.shop_name.trim() || null,
+      shop_name: (() => { const t = f.shop_name.trim().replace(/\s+/g, " "); if (!t) return null; return allShops().find((x) => x.toLowerCase() === t.toLowerCase()) || t; })(),
       paid: !!f.paid,
       amount: f.paid ? Math.round(+f.amount * 100) / 100 : null,
       hst_included: f.paid ? !!f.hst_included : null,
