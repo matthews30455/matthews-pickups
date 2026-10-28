@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.7.4";
+const VERSION = "1.8.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -539,7 +539,8 @@ function cardHtml(p) {
       <span class="icons">${p.invoice_path ? "📄" : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</span>
     </div></div>`;
 }
-const progiPill = (p) => p.progi_status === "submitted" ? `<span class="pill green">Progi ✓</span>` : `<span class="pill">Progi pending</span>`;
+const progiPill = (p) => p.progi_status === "submitted" ? `<span class="pill green">Progi ✓</span>`
+  : p.progi_status === "queued" ? `<span class="pill amber">📤 Progi queue</span>` : `<span class="pill">Progi pending</span>`;
 
 // ─────────────────────────────────────────────────────────────── pickup form
 /**
@@ -1116,7 +1117,7 @@ async function renderDash() {
       <div class="frow">
         <select id="fDriver"><option value="">All drivers</option></select>
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
-        <select id="fProgi"><option value="">Progi: all</option><option value="pending">Progi: pending</option><option value="submitted">Progi: submitted</option></select>
+        <select id="fProgi"><option value="">Progi: all</option><option value="pending">Progi: pending</option><option value="queued">Progi: upload queue</option><option value="submitted">Progi: submitted</option></select>
         <input id="fQ" type="search" placeholder="Search file #, VIN, make/model">
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
@@ -1151,11 +1152,12 @@ async function loadDash() { await Promise.all([loadStats(), loadList()]); }
 
 async function loadStats() {
   const since7 = torontoMidnight(6), today0 = torontoMidnight(0);
-  const [{ data: wk }, { count: pending }, { data: expiring }] = await Promise.all([
+  const [{ data: wk }, { count: pending }, { data: expiring }, { data: queued }] = await Promise.all([
     sb.from("pickups").select("picked_up_at, paid, amount, payment_type").gte("picked_up_at", since7),
-    sb.from("pickups").select("id", { count: "exact", head: true }).eq("progi_status", "pending"),
-    sb.from("pickups").select("id, file_number, recorded_at").eq("progi_status", "pending")
+    sb.from("pickups").select("id", { count: "exact", head: true }).neq("progi_status", "submitted"),
+    sb.from("pickups").select("id, file_number, recorded_at").neq("progi_status", "submitted")
       .lt("recorded_at", new Date(Date.now() - 10 * 864e5).toISOString()).order("recorded_at").limit(20),
+    sb.from("pickups").select("id, file_number").eq("progi_status", "queued").order("picked_up_at").limit(50),
   ]);
   const rows = wk || [];
   const today = rows.filter((r) => r.picked_up_at >= today0);
@@ -1167,7 +1169,9 @@ async function loadStats() {
     <div class="stat"><small>Today</small><b>${today.length}</b><span>pickups</span></div>
     <div class="stat"><small>Last 7 days</small><b>${rows.length}</b><span>pickups</span></div>
     <div class="stat wide"><small>Paid today</small><b>${money(sum)}</b><span>${by.length ? by.map(([l, a]) => `${l} ${money(a)}`).join(" · ") : "nothing paid"}</span></div>
-    <div class="stat ${pending ? "alert" : ""}" id="pendTile" role="button"><small>Not in Progi yet</small><b>${pending ?? "–"}</b><span>tap to show</span></div>`;
+    <div class="stat ${pending ? "alert" : ""}" id="pendTile" role="button"><small>Not in Progi yet</small><b>${pending ?? "–"}</b><span>tap to show</span></div>
+    ${(queued || []).length ? `<div class="stat wide queue" id="queueTile" role="button"><small>📤 Progi upload queue</small><b>${queued.length}</b><span>${queued.map((r) => esc(r.file_number)).join(" · ")} — ask Claude: “upload the Progi queue”</span></div>` : ""}`;
+  const qt = $("#queueTile"); if (qt) qt.onclick = () => { S.filters.progi = "queued"; S.filters.range = "all"; renderDash(); };
   $("#pendTile").onclick = () => { S.filters.progi = "pending"; S.filters.range = "all"; renderDash(); };
   const al = $("#alerts");
   if (al) al.innerHTML = (expiring || []).length
@@ -1302,7 +1306,11 @@ async function renderDetail(id) {
       <div class="btnrow">
         ${p.progi_status === "submitted"
           ? `<button class="btn ghost" id="progiBtn" data-v="pending">Undo Progi (submitted ${fmtShort.format(new Date(p.progi_submitted_at))})</button>`
-          : `<button class="btn primary" id="progiBtn" data-v="submitted">Mark as submitted to Progi</button>`}
+          : p.progi_status === "queued"
+          ? `<button class="btn ghost" id="queueBtn" data-v="pending">📤 In Progi upload queue — cancel</button>
+             <button class="btn" id="progiBtn" data-v="submitted">Mark as submitted to Progi</button>`
+          : `<button class="btn primary" id="queueBtn" data-v="queued">📤 Upload to Progi</button>
+             <button class="btn" id="progiBtn" data-v="submitted">Mark as submitted to Progi</button>`}
         ${p.qb_status === "done"
           ? `<button class="btn ghost" id="qbBtn" data-v="pending">Undo QuickBooks (${fmtShort.format(new Date(p.qb_done_at))})</button>`
           : `<button class="btn" id="qbBtn" data-v="done">Mark entered in QuickBooks</button>`}
@@ -1336,6 +1344,12 @@ async function renderDetail(id) {
     toast(msg, "ok"); renderDetail(p.id);
   };
   $("#progiBtn").onclick = (e) => setField({ progi_status: e.target.dataset.v }, e.target.dataset.v === "submitted" ? "Marked submitted to Progi" : "Set back to pending");
+  const qb = $("#queueBtn");
+  if (qb) qb.onclick = (e) => {
+    const v = e.target.dataset.v;
+    if (v === "queued" && (p.photo_paths?.length || 0) < PROGI_MIN_PHOTOS && !confirm(`Only ${p.photo_paths?.length || 0} photos (Progi needs ${PROGI_MIN_PHOTOS}). Add to the upload queue anyway?`)) return;
+    setField({ progi_status: v }, v === "queued" ? "Added to the Progi upload queue" : "Removed from the upload queue");
+  };
   $("#qbBtn").onclick = (e) => setField({ qb_status: e.target.dataset.v }, e.target.dataset.v === "done" ? "Marked done in QuickBooks" : "Set back to pending");
   $("#delBtn").onclick = () => {
     $("#delBox").innerHTML = `<div class="confirm">Delete <b>${esc(p.file_number)}</b> and its files? This can't be undone.

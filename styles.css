@@ -279,3 +279,6 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 /* colour chips */
 .chips.colors button { display: inline-flex; align-items: center; gap: 7px; }
 .chips.colors .sw { width: 16px; height: 16px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); flex: none; }
+
+.stat.queue { background: var(--amber-soft); border-color: var(--amber); cursor: pointer; }
+.stat.queue span { white-space: normal; }
