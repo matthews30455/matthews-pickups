@@ -299,3 +299,8 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .tbl th.sortable .arrow { opacity: .45; font-size: .9em; }
 .tbl th.sortable.on { color: var(--ink); }
 .tbl th.sortable.on .arrow { opacity: 1; }
+
+.rangerow { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.daterange { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .9rem; color: var(--muted); }
+.daterange label { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.daterange input { font: inherit; padding: 7px 9px; border: 1px solid #d6dbe4; border-radius: 10px; background: #fff; color: var(--ink); }

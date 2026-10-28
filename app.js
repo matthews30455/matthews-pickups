@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.9.2";
+const VERSION = "1.10.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -48,6 +48,12 @@ function tzOffsetMin(date) {
   const p = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeZoneName: "shortOffset" }).formatToParts(date);
   const m = (p.find((x) => x.type === "timeZoneName")?.value || "GMT-5").match(/GMT([+-]\d+)(?::(\d+))?/);
   return m ? Number(m[1]) * 60 + Math.sign(Number(m[1])) * Number(m[2] || 0) : -300;
+}
+/** Toronto midnight at the start of a YYYY-MM-DD day (plus `addDays`), as an ISO string */
+function torontoDayStart(ymd, addDays = 0) {
+  const [y, mo, d] = ymd.split("-").map(Number);
+  const guess = new Date(Date.UTC(y, mo - 1, d + addDays));
+  return new Date(guess.getTime() - tzOffsetMin(guess) * 60000).toISOString();
 }
 /** Toronto midnight `daysAgo` days back, as an ISO string */
 function torontoMidnight(daysAgo = 0) {
@@ -102,14 +108,41 @@ function mapType(vt, body) {
   if (vt.includes("PASSENGER")) return "Car";
   return "";
 }
+// When NHTSA leaves gaps (common for Canadian-built cars) we fill from the model name.
+const SUV_RE = /\b(rav4|cr-?v|hr-?v|rogue|murano|pathfinder|armada|kicks|qashqai|juke|escape|edge|explorer|expedition|bronco|ecosport|flex|equinox|traverse|tahoe|suburban|blazer|trax|trailblazer|terrain|acadia|yukon|envision|encore|enclave|tucson|santa fe|kona|palisade|venue|ioniq 5|sportage|sorento|telluride|seltos|niro|soul|cx-?\d+|cx-30|forester|outback|crosstrek|ascent|xv|highlander|4runner|sequoia|venza|c-hr|corolla cross|land cruiser|pilot|passport|cherokee|grand cherokee|compass|renegade|wrangler|durango|journey|nitro|patriot|liberty|outlander|rvr|eclipse cross|tiguan|atlas|taos|touareg|q[3578]|x[1-7]|gl[abcse]|ml|gle|glk|nx|rx|ux|gx|lx|rdx|mdx|qx\d+|xt[456]|escalade|srx|navigator|aviator|nautilus|corsair|mkx|mkc|model [yx]|macan|cayenne|range rover|discovery|evoque|velar|countryman|xc\d0|f-pace|e-pace|stelvio|mustang mach-e|ev9|ex30|bz4x)\b/i;
+const PICKUP_RE = /\b(f-?150|f-?250|f-?350|ranger|maverick|silverado|colorado|sierra|canyon|ram|1500|2500|3500|tacoma|tundra|frontier|titan|ridgeline|gladiator|santa cruz|cybertruck|dakota)\b/i;
+const VAN_RE = /\b(odyssey|sienna|caravan|grand caravan|pacifica|voyager|transit|e-?series|econoline|sprinter|metris|express|savana|promaster|nv200|nv\d+|carnival|sedona|quest|town (and|&) country|routan|kona electric van)\b/i;
+const RWD_RE = /\b(mustang|camaro|corvette|challenger|charger|300|magnum|genesis|g70|g80|g90|is|gs|ls|rc|lc|q50|q60|q70|g37|ats|cts|ct4|ct5|3 series|4 series|5 series|[2-8]\d\di|c-?class|e-?class|s-?class|c\d{3}|e\d{3}|mx-5|miata|86|brz|gr86|supra|370z|350z|stinger|model s|model 3|transit|sprinter|express|savana|promaster)\b/i;
+function typeFromModel(model) {
+  if (PICKUP_RE.test(model)) return "Pickup";
+  if (VAN_RE.test(model)) return "Van";
+  if (SUV_RE.test(model)) return "SUV";
+  return "";
+}
+/** "2WD/4x2" from NHTSA → FWD or RWD by model (pickups, vans, sports & luxury sedans are RWD; the rest FWD) */
+function resolve2wd(model, type) {
+  if (type === "Pickup" || type === "Truck" || RWD_RE.test(model)) return "RWD";
+  return "FWD";
+}
+
 async function decodeVin(vin) {
   const r = (await vpic("DecodeVinValues/" + vin))[0] || {};
   if (!r.Make && !r.Model) throw new Error("No vehicle found for this VIN — check it for typos");
-  return {
-    year: r.ModelYear || "", make: titleMake(r.Make), model: (r.Model || "").trim(),
-    drive_raw: mapDrive(r.DriveType), vehicle_type: mapType(r.VehicleType, r.BodyClass),
+  const model = (r.Model || "").trim();
+  const guessed = [];
+  let vehicle_type = mapType(r.VehicleType, r.BodyClass);
+  if (!vehicle_type || vehicle_type === "Car") { const t = typeFromModel(model); if (t) { if (!vehicle_type) guessed.push("type"); vehicle_type = t; } }
+  if (!vehicle_type && model) { vehicle_type = "Car"; guessed.push("type"); }
+  let drive_raw = mapDrive(r.DriveType);
+  if (drive_raw === "2WD") { drive_raw = resolve2wd(model, vehicle_type); guessed.push("drive"); }
+  let transmission = /manual/i.test(r.TransmissionStyle || "") ? "Manual" : /auto|cvt|dual|direct drive/i.test(r.TransmissionStyle || "") ? "Automatic" : "";
+  if (!transmission && /electric/i.test(r.FuelTypePrimary || "")) transmission = "Automatic";
+  if (!transmission) { transmission = "Automatic"; guessed.push("transmission"); }
+  return { guessed,
+    year: r.ModelYear || "", make: titleMake(r.Make), model,
+    drive_raw, vehicle_type,
     body: r.BodyClass || "", trim: r.Trim || "",
-    transmission: /manual/i.test(r.TransmissionStyle || "") ? "Manual" : /auto|cvt|dual/i.test(r.TransmissionStyle || "") ? "Automatic" : "",
+    transmission,
     specs: {
       trim: [r.Trim, r.Series].filter(Boolean).join(" "), body: r.BodyClass || "", fuel: r.FuelTypePrimary || "",
       liters: r.DisplacementL ? (+r.DisplacementL).toFixed(1) : "", cylinders: r.EngineCylinders || "",
@@ -308,7 +341,7 @@ const S = {
   drivers: [],         // owner: all profiles
   suggestions: JSON.parse(localStorage.getItem("mp-sugg") || "[]"),
   shops: JSON.parse(localStorage.getItem("mp-shops-all") || "[]"),
-  filters: { range: "7", driver: "", pay: "", progi: "", q: "", sort: "picked_up_at", asc: false },
+  filters: { range: "7", from: "", to: "", driver: "", pay: "", progi: "", q: "", sort: "picked_up_at", asc: false },
   list: [],
   outboxCount: 0,
 };
@@ -860,7 +893,9 @@ function renderForm(existing, opts = {}) {
       if (d.vehicle_type) f.vehicle_type = d.vehicle_type;
       setChips(); syncVehicle();
       [selYear, selMake, selModel].forEach(clearBad);
-      msg.textContent = `✓ ${[d.year, d.make, d.model, d.trim].filter(Boolean).join(" ")}${d.body ? " · " + d.body.split("/")[0].trim() : ""}${d.drive_raw === "2WD" ? " · 2WD — tap FWD or RWD below" : d.drive_raw ? " · " + d.drive_raw : " · drive not listed"}`
+      const g = d.guessed || [];
+      msg.textContent = `✓ Filled: ${[d.year, d.make, d.model, d.trim].filter(Boolean).join(" ")} · ${[d.vehicle_type, d.drive_raw || "drive not listed — tap it below", d.transmission].filter(Boolean).join(" · ")}`
+        + (g.length ? ` (best guess: ${g.join(", ")} — check)` : "")
         + (vinCheckOk(vin) ? "" : " — check digit doesn't match, double-check the VIN");
       msg.className = "hint ok";
     } catch (err) {
@@ -1123,21 +1158,32 @@ async function renderDash() {
     <section class="stats" id="stats">${["Today", "Last 7 days", "Paid today", "Not in Progi yet"].map((l) => `<div class="stat"><small>${l}</small><b>–</b></div>`).join("")}</section>
     <div id="alerts"></div>
     <section class="card filters">
-      <div class="seg" id="range">${[["0", "Today"], ["7", "7 days"], ["30", "30 days"], ["all", "All"]].map(([v, l]) => `<button data-v="${v}">${l}</button>`).join("")}</div>
+      <div class="rangerow">
+        <div class="seg" id="range">${[["0", "Today"], ["7", "7 days"], ["30", "30 days"], ["all", "All"]].map(([v, l]) => `<button data-v="${v}">${l}</button>`).join("")}</div>
+        <div class="daterange"><label>From <input type="date" id="fFrom"></label><label>To <input type="date" id="fTo"></label>
+          <button class="btn ghost sm" id="fClearDates" hidden>Clear dates</button></div>
+      </div>
       <div class="frow">
         <select id="fDriver"><option value="">All drivers</option></select>
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
         <select id="fProgi"><option value="">Progi: all</option><option value="pending">Progi: pending</option><option value="queued">Progi: upload queue</option><option value="submitted">Progi: submitted</option></select>
-        <input id="fQ" type="search" placeholder="Search file #, VIN, make/model">
+        <input id="fQ" type="search" placeholder="Search: CR-V, 2018 Civic, 6458, VIN, shop, colour…">
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
     </section>
     <div id="list"><div class="muted">Loading…</div></div>`, { title: "Dashboard" });
 
   const fl = S.filters;
-  const setSeg = () => $$("#range button").forEach((b) => b.classList.toggle("on", b.dataset.v === fl.range));
+  const custom = () => !!(fl.from || fl.to);
+  const setSeg = () => {
+    $$("#range button").forEach((b) => b.classList.toggle("on", !custom() && b.dataset.v === fl.range));
+    $("#fFrom").value = fl.from; $("#fTo").value = fl.to; $("#fClearDates").hidden = !custom();
+  };
   setSeg();
-  $("#range").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; fl.range = b.dataset.v; setSeg(); loadList(); };
+  $("#range").onclick = (e) => { const b = e.target.closest("button"); if (!b) return; fl.range = b.dataset.v; fl.from = fl.to = ""; setSeg(); loadList(); };
+  $("#fFrom").onchange = (e) => { fl.from = e.target.value; setSeg(); loadList(); };
+  $("#fTo").onchange = (e) => { fl.to = e.target.value; setSeg(); loadList(); };
+  $("#fClearDates").onclick = () => { fl.from = fl.to = ""; setSeg(); loadList(); };
   $("#fPay").value = fl.pay; $("#fProgi").value = fl.progi; $("#fQ").value = fl.q;
   $("#fDriver").onchange = (e) => { fl.driver = e.target.value; loadList(); };
   $("#fPay").onchange = (e) => { fl.pay = e.target.value; loadList(); };
@@ -1189,6 +1235,8 @@ async function loadStats() {
   $$("#alerts [data-open]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); go("detail", a.dataset.open); }));
 }
 
+const normSearch = (t) => String(t || "").toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean).slice(0, 6);
+
 function sortTh(key, label, cls = "") {
   const fl = S.filters, on = fl.sort === key;
   return `<th class="sortable ${cls} ${on ? "on" : ""}" data-sort="${key}" title="Sort">${label} <span class="arrow">${on ? (fl.asc ? "▲" : "▼") : "↕"}</span></th>`;
@@ -1197,14 +1245,15 @@ function sortTh(key, label, cls = "") {
 async function loadList() {
   const fl = S.filters;
   let q = sb.from("pickups").select("*").order(fl.sort || "picked_up_at", { ascending: !!fl.asc }).order("picked_up_at", { ascending: false }).limit(500);
-  if (fl.range !== "all") q = q.gte("picked_up_at", torontoMidnight(fl.range === "0" ? 0 : +fl.range - 1));
+  if (fl.from || fl.to) {
+    if (fl.from) q = q.gte("picked_up_at", torontoDayStart(fl.from));
+    if (fl.to) q = q.lt("picked_up_at", torontoDayStart(fl.to, 1));
+  } else if (fl.range !== "all") q = q.gte("picked_up_at", torontoMidnight(fl.range === "0" ? 0 : +fl.range - 1));
   if (fl.driver) q = q.eq("driver_id", fl.driver);
   if (fl.pay === "none") q = q.eq("paid", false); else if (fl.pay) q = q.eq("payment_type", fl.pay);
   if (fl.progi) q = q.eq("progi_status", fl.progi);
-  if (fl.q) {
-    const s = fl.q.replace(/[%,()]/g, " ").trim();
-    q = q.or(`file_number.ilike.%${s}%,make.ilike.%${s}%,model.ilike.%${s}%,shop_name.ilike.%${s}%,vin.ilike.%${s}%`);
-  }
+  // every word must match somewhere (file #, VIN, year, make, model, shop, colour, type); dashes/spaces ignored
+  for (const w of normSearch(fl.q)) q = q.ilike("search_text", `%${w}%`);
   const { data, error } = await q;
   const el = $("#list"); if (!el) return;
   if (error) { el.innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
@@ -1217,7 +1266,7 @@ async function loadList() {
         <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
-        <td class="nowrap">${(() => { const d = p.picked_up_at || p.recorded_at; return d ? `<b>${dayKey(d)}</b><small class="muted block">${fmtTime.format(new Date(d))}</small>` : "—"; })()}</td>
+        <td class="nowrap">${(() => { const d = p.picked_up_at || p.recorded_at; return d ? `<b>${dayKey(d)}</b>` : "—"; })()}</td>
         <td class="r">${p.paid ? `<b>${money(p.amount)}</b><small class="muted block">${PAY_LABEL[p.payment_type]}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}</small>` : `<span class="muted">—</span>`}</td>
         <td class="acts">${p.progi_status === "submitted"
           ? `<span class="pill green">Progi ✓</span><button class="mini ghost" data-act="progi_status" data-v="pending" data-id="${p.id}" title="Undo">↺</button>`
