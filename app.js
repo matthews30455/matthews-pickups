@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.7.3";
+const VERSION = "1.7.4";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -42,7 +42,7 @@ const fmtTime = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, hour: "numeric"
 const fmtShort = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, month: "short", day: "numeric" });
 const dayKey = (d) => fmtDay.format(new Date(d)); // YYYY-MM-DD in Toronto
 const isToday = (d) => dayKey(d) === dayKey(new Date());
-const whenLabel = (d) => (isToday(d) ? "Today " : fmtShort.format(new Date(d)) + ", ") + fmtTime.format(new Date(d));
+const whenLabel = (d) => !d || isNaN(new Date(d)) ? "—" : (isToday(d) ? "Today " : fmtShort.format(new Date(d)) + ", ") + fmtTime.format(new Date(d));
 
 function tzOffsetMin(date) {
   const p = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeZoneName: "shortOffset" }).formatToParts(date);
@@ -1085,7 +1085,7 @@ function renderForm(existing, opts = {}) {
       if (!data?.length) throw new Error(isOwner() ? "Not saved" : "Can only edit today's pickups");
       if (removePhotos.size && isOwner()) await sb.storage.from(BUCKET).remove([...removePhotos]);
       toast("Saved ✓", "ok");
-      opts.onSaved ? opts.onSaved() : go("detail", existing.id);
+      opts.onSaved ? opts.onSaved() : go(isOwner() ? "dash" : "home");
     } catch (err) {
       $("#formErr").textContent = err.message || "Could not save";
       btn.disabled = false; btn.textContent = edit ? "Save changes" : "Save Pickup";
@@ -1277,7 +1277,7 @@ async function renderDetail(id) {
       <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
       <div>${esc(veh)} · ${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))} ${p.burned ? `<span class="pill red">Burned</span>` : ""}</div>
       ${p.vin ? `<div class="mono small">VIN ${esc(p.vin)}</div>` : ""}
-      <div class="muted small">Picked up ${whenLabel(p.picked_up_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
+      <div class="muted small">Picked up ${whenLabel(p.picked_up_at || p.recorded_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
       <div class="kv">
         <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
@@ -1321,7 +1321,7 @@ async function renderDetail(id) {
     $("#openPdf").onclick = async () => { const w = window.open("", "_blank"); try { const u = await signedUrl(p.invoice_path); if (w) w.location = u; else location.href = u; } catch (e) { w?.close(); toast(e.message, "err"); } };
     $("#dlPdf").onclick = async () => { try { location.href = await signedUrl(p.invoice_path, `${p.file_number}.pdf`); } catch (e) { toast(e.message, "err"); } };
   }
-  if (canEdit) renderForm(p, { mount: $("#editMount"), onSaved: () => renderDetail(p.id) });
+  if (canEdit) renderForm(p, { mount: $("#editMount"), onSaved: () => go(isOwner() ? "dash" : "home") });
 
   if (!isOwner()) return;
   const aiBtn = $("#feesAiBtn");
