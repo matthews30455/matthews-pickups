@@ -293,3 +293,9 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 
 .tbl td.fileno { white-space: nowrap; }
 .tbl td.fileno small { display: block; }
+
+.tbl th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.tbl th.sortable:hover { color: var(--ink); }
+.tbl th.sortable .arrow { opacity: .45; font-size: .9em; }
+.tbl th.sortable.on { color: var(--ink); }
+.tbl th.sortable.on .arrow { opacity: 1; }

@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.9.1";
+const VERSION = "1.9.2";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -308,7 +308,7 @@ const S = {
   drivers: [],         // owner: all profiles
   suggestions: JSON.parse(localStorage.getItem("mp-sugg") || "[]"),
   shops: JSON.parse(localStorage.getItem("mp-shops-all") || "[]"),
-  filters: { range: "7", driver: "", pay: "", progi: "", q: "" },
+  filters: { range: "7", driver: "", pay: "", progi: "", q: "", sort: "picked_up_at", asc: false },
   list: [],
   outboxCount: 0,
 };
@@ -1189,9 +1189,14 @@ async function loadStats() {
   $$("#alerts [data-open]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); go("detail", a.dataset.open); }));
 }
 
+function sortTh(key, label, cls = "") {
+  const fl = S.filters, on = fl.sort === key;
+  return `<th class="sortable ${cls} ${on ? "on" : ""}" data-sort="${key}" title="Sort">${label} <span class="arrow">${on ? (fl.asc ? "▲" : "▼") : "↕"}</span></th>`;
+}
+
 async function loadList() {
   const fl = S.filters;
-  let q = sb.from("pickups").select("*").order("picked_up_at", { ascending: false }).limit(500);
+  let q = sb.from("pickups").select("*").order(fl.sort || "picked_up_at", { ascending: !!fl.asc }).order("picked_up_at", { ascending: false }).limit(500);
   if (fl.range !== "all") q = q.gte("picked_up_at", torontoMidnight(fl.range === "0" ? 0 : +fl.range - 1));
   if (fl.driver) q = q.eq("driver_id", fl.driver);
   if (fl.pay === "none") q = q.eq("paid", false); else if (fl.pay) q = q.eq("payment_type", fl.pay);
@@ -1207,12 +1212,12 @@ async function loadList() {
   if (!data.length) { el.innerHTML = `<div class="empty">No pickups match.</div>`; return; }
   el.innerHTML = `
     <table class="tbl">
-      <thead><tr><th>File #</th><th>Vehicle</th><th>Driver</th><th>Picked up</th><th class="r">Paid</th><th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
+      <thead><tr>${sortTh("file_number", "File #")}<th>Vehicle</th><th>Driver</th>${sortTh("picked_up_at", "Pickup date")}${sortTh("amount", "Paid", "r")}<th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
       <tbody>${data.map((p) => `<tr data-open="${p.id}">
         <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
-        <td>${whenLabel(p.picked_up_at)}</td>
+        <td class="nowrap">${(() => { const d = p.picked_up_at || p.recorded_at; return d ? `<b>${dayKey(d)}</b><small class="muted block">${fmtTime.format(new Date(d))}</small>` : "—"; })()}</td>
         <td class="r">${p.paid ? `<b>${money(p.amount)}</b><small class="muted block">${PAY_LABEL[p.payment_type]}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}</small>` : `<span class="muted">—</span>`}</td>
         <td class="acts">${p.progi_status === "submitted"
           ? `<span class="pill green">Progi ✓</span><button class="mini ghost" data-act="progi_status" data-v="pending" data-id="${p.id}" title="Undo">↺</button>`
@@ -1227,6 +1232,11 @@ async function loadList() {
       </tr>`).join("")}</tbody>
     </table>
     <p class="muted small">${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} pickup${data.length > 1 ? "s" : ""}</p>`;
+  $$("[data-sort]", el).forEach((h) => (h.onclick = () => {
+    const k = h.dataset.sort;
+    if (fl.sort === k) fl.asc = !fl.asc; else { fl.sort = k; fl.asc = k === "file_number"; }
+    loadList();
+  }));
   $$("[data-open]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-act]")) go("detail", r.dataset.open); }));
   $$("[data-act]", el).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
