@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.10.2";
+const VERSION = "1.10.3";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -401,7 +401,7 @@ function renderLogin() {
   document.body.dataset.view = "login";
   $("#app").innerHTML = `
   <div class="login">
-    <div class="brand-big"><div class="logo">M</div><div><h1>Matthews Pickups</h1><p class="muted">Driver sign in</p></div></div>
+    <img class="login-logo" src="logo.png" alt="Matthews Auto Parts & Tires"><div class="brand-big"><div><h1>Matthews Pickups</h1><p class="muted">Driver sign in</p></div></div>
     <form id="loginForm" class="card stack" autocomplete="on">
       <label class="field"><span>Username</span>
         <input name="u" autocapitalize="none" autocorrect="off" spellcheck="false" autocomplete="username" required></label>
@@ -445,7 +445,7 @@ function shell(inner, { title = "", back = null } = {}) {
     : [["home", "My pickups"], ["form", "New pickup"]];
   $("#app").innerHTML = `
     <header class="top">
-      ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : `<div class="logo sm">M</div>`}
+      ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : ""}<img class="toplogo" src="logo.png" alt="Matthews">
       <div class="top-title">${esc(title || "Matthews Pickups")}<small>${esc(S.me.full_name)}${isOwner() ? " · Owner" : ""}</small></div>
       <span class="net" id="net"></span>
       <button class="btn sm signout" id="menuBtn">Sign out</button>
