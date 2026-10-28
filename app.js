@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.8.1";
+const VERSION = "1.9.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -436,7 +436,7 @@ function go(view, arg) {
   document.body.dataset.view = view;
   window.scrollTo(0, 0);
   if (view === "home") return renderHome();
-  if (view === "form") return renderForm(null);
+  if (view === "form") return isOwner() && !S.drivers.length ? loadDrivers().then(() => renderForm(null)) : renderForm(null);
   if (view === "dash") return renderDash();
   if (view === "drivers") return renderDrivers();
   if (view === "detail") return renderDetail(arg);
@@ -486,7 +486,7 @@ async function syncOutbox(manual = false) {
 }
 
 async function sendItem(it) {
-  const base = `${it.uid}/${it.client_id}/`;
+  const base = `${it.folder || it.uid}/${it.client_id}/`;
   const row = { ...it.row };
   if (it.invoice) {
     const path = base + "invoice.pdf";
@@ -551,6 +551,7 @@ function renderForm(existing, opts = {}) {
   const edit = !!existing;
   const f = {
     file_number: existing?.file_number || "",
+    driver_id: existing?.driver_id || "",
     picked_up_at: localInputValue(existing?.picked_up_at || existing?.recorded_at || new Date()),
     vin: existing?.vin || "",
     drive_type: existing?.drive_type || "",
@@ -595,6 +596,10 @@ function renderForm(existing, opts = {}) {
   const html = `
   <form id="pf" class="stack form" novalidate>
     ${edit ? "" : `<p class="muted small">Fill in and tap Save. Works without internet — it sends later.</p>`}
+    ${isOwner() ? `<label class="field ownerpick"><span>Picked up by (driver) *</span>
+      <select name="driver_id" id="selDriver"><option value="">Pick the driver…</option>
+        ${S.drivers.filter((d) => d.active || d.id === f.driver_id).map((d) => `<option value="${d.id}">${esc(d.full_name)}${d.role === "owner" ? " (me)" : ""}${d.active ? "" : " (off)"}</option>`).join("")}
+      </select><em class="hint">Counts in this driver's pickups.</em></label>` : ""}
     <label class="field"><span>File Number *</span>
       <input name="file_number" class="mono upper" placeholder="MT-A6342" autocapitalize="characters" autocorrect="off" spellcheck="false" value="${esc(f.file_number)}">
       <em class="hint" id="dupWarn"></em></label>
@@ -717,6 +722,9 @@ function renderForm(existing, opts = {}) {
   if (target) target.innerHTML = html;
   else shell(html, { title: edit ? "Edit " + existing.file_number : "New pickup", back: edit ? () => go("detail", existing.id) : null });
   const form = $("#pf");
+
+  const sd = $("#selDriver");
+  if (sd) { sd.value = f.driver_id; sd.onchange = (e) => { f.driver_id = e.target.value; e.target.closest(".field").classList.remove("bad"); }; }
 
   // chips
   const setChips = () => {
@@ -986,6 +994,7 @@ function renderForm(existing, opts = {}) {
     if (!f.make.trim()) errs.push(["make", "Make is required"]);
     if (!f.model.trim()) errs.push(["model", "Model is required"]);
     if (!f.color) errs.push(["color", "Pick the colour"]);
+    if (isOwner() && !f.driver_id) errs.push(["driver_id", "Pick which driver picked it up"]);
     if (f.paid === null) errs.push(["paid", "Was the shop paid? Tap Yes or No"]);
     if (f.paid) {
       if (!(+f.amount > 0)) errs.push(["amount", "Enter the amount paid"]);
@@ -1041,6 +1050,7 @@ function renderForm(existing, opts = {}) {
       cheque_date: f.paid && f.payment_type === "cheque" ? f.cheque_date : null,
       extras: f.extras,
       notes: f.notes.trim() || null,
+      ...(isOwner() && f.driver_id ? { driver_id: f.driver_id } : {}),
     };
     if (row.shop_name) localStorage.setItem("mp-shops", JSON.stringify([row.shop_name, ...shops.filter((s) => s !== row.shop_name)].slice(0, 80)));
 
@@ -1053,7 +1063,7 @@ function renderForm(existing, opts = {}) {
       if (!edit) {
         const client_id = uuid();
         await outbox.put({
-          client_id, uid: S.user.id, created: Date.now(),
+          client_id, uid: S.user.id, folder: row.driver_id || S.user.id, created: Date.now(),
           row: { ...row, client_id, recorded_at: new Date().toISOString(), invoice_pages: invoicePages },
           invoice: invoiceBlob, photos: photos.map((p) => p.blob),
         });
