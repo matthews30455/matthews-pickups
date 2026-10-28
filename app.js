@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.11.0";
+const VERSION = "1.11.2";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1268,7 +1268,10 @@ async function refreshJobs(progress) {
     while (queue.length) {
       const j = queue.shift();
       try {
-        const t = await (await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en")).json();
+        const res = await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en");
+        if (!res.ok) { progress?.(++done, jobs.length); continue; } // on-hold files have no public ticket yet
+        const t = await res.json();
+        if (!t.pixNumber) throw new Error("no ticket");
         const { error: e } = await sb.from("progi_jobs").update(ticketPatch(t)).eq("file_number", j.file_number);
         if (e) throw e;
       } catch { failed++; }
@@ -1280,9 +1283,11 @@ async function refreshJobs(progress) {
 /** owner (Claude runs this): "MTA6474:token:R|H:from:due;..." from the ProgiPix "To be completed" list */
 async function importJobs(str) {
   const rows = String(str).split(";").map((x) => x.trim()).filter(Boolean).map((x) => {
-    const [pix, tok, st, from, due] = x.split(":");
+    const [pix, tok, st, from, due, yr, mk, md, city] = x.split(":");
+    const d = (v) => (v ? decodeURIComponent(v) : null);
     return { file_number: pixToFile(pix), ticket_token: tok, status: st === "H" ? "hold" : "open",
-      pickup_from: from || null, due_date: due && (!from || due >= from) ? due : null };
+      pickup_from: from || null, due_date: due && (!from || due >= from) ? due : null,
+      ...(yr ? { year: +yr || null, make: d(mk), model: d(md), shop_city: d(city) } : {}) };
   });
   if (!rows.length) throw new Error("Empty list");
   const { error } = await sb.from("progi_jobs").upsert(rows, { onConflict: "file_number" });
@@ -1305,7 +1310,7 @@ function jobCard(j, { compact = false } = {}) {
     <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>
       ${j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
     <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
-    ${j.est_total != null ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : ""}
+    ${j.est_total == null ? "" : +j.est_total > 0 ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : `<div class="small muted">Nothing to pay (per Progi)</div>`}
     ${j.instructions ? `<div class="small muted job-notes">${esc(j.instructions)}</div>` : ""}
     ${compact ? "" : `<div class="job-act">
       ${isOwner() ? `<select class="job-assign" data-assign="${esc(j.file_number)}"><option value="">Not assigned</option>${drv.map((d) => `<option value="${d.id}"${d.id === j.assigned_driver ? " selected" : ""}>${esc(d.full_name)}${d.role === "owner" ? " (me)" : ""}</option>`).join("")}</select>` : ""}
