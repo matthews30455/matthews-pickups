@@ -265,3 +265,13 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .okc { color: var(--green) !important; font-weight: 700; }
 .cond-list { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); display: grid; gap: 2px; }
 .kv.fees { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); margin-bottom: 8px; }
+
+/* photo viewer */
+.viewer { position: fixed; inset: 0; z-index: 1000; background: rgba(8,14,28,.93); display: flex; align-items: center; justify-content: center; }
+.viewer img { max-width: 94vw; max-height: 88vh; object-fit: contain; border-radius: 6px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+.viewer .vbtn { position: absolute; border: 0; background: rgba(255,255,255,.14); color: #fff; font-size: 34px; line-height: 1; width: 52px; height: 52px; border-radius: 50%; cursor: pointer; }
+.viewer .vbtn:hover { background: rgba(255,255,255,.28); }
+.viewer .vprev { left: 14px; top: 50%; transform: translateY(-50%); }
+.viewer .vnext { right: 14px; top: 50%; transform: translateY(-50%); }
+.viewer .vclose { top: 14px; right: 14px; font-size: 30px; }
+.viewer .vcount { position: absolute; bottom: 16px; left: 0; right: 0; text-align: center; color: #cfd6e4; font-size: 14px; }

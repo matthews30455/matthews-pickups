@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.7.1";
+const VERSION = "1.7.2";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -700,7 +700,7 @@ function renderForm(existing, opts = {}) {
       <div id="photoGrid" class="photos"></div>
       <div class="btnrow">
         <label class="btn filebtn">📷 Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
-        <label class="btn ghost filebtn">From gallery<input type="file" accept="image/*" multiple id="galIn" hidden></label>
+        <label class="btn ghost filebtn">From gallery<input type="file" accept="image/*,.heic,.heif" multiple id="galIn" hidden></label>
       </div></div>
 
     <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Anything the office should know">${esc(f.notes)}</textarea></label>
@@ -1426,3 +1426,29 @@ async function renderDrivers() {
 // ─────────────────────────────────────────────────────────────── start
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("./sw.js").catch(() => {});
 boot();
+
+// ---- photo viewer: click any photo thumbnail to see it large (← → to move, Esc / click to close)
+function openViewer(imgs, start) {
+  let i = start;
+  const ov = document.createElement("div");
+  ov.className = "viewer";
+  ov.innerHTML = `<img alt=""><button type="button" class="vbtn vprev" aria-label="Previous">‹</button>
+    <button type="button" class="vbtn vnext" aria-label="Next">›</button><button type="button" class="vbtn vclose" aria-label="Close">×</button><div class="vcount"></div>`;
+  const show = () => { ov.querySelector("img").src = imgs[i]; ov.querySelector(".vcount").textContent = `${i + 1} / ${imgs.length}`; };
+  const close = () => { ov.remove(); document.removeEventListener("keydown", key); };
+  const step = (d) => { i = (i + d + imgs.length) % imgs.length; show(); };
+  const key = (e) => { if (e.key === "Escape") close(); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "ArrowRight") step(1); };
+  ov.onclick = (e) => {
+    if (e.target.closest(".vprev")) step(-1); else if (e.target.closest(".vnext")) step(1); else close();
+  };
+  ov.querySelector(".vprev").hidden = ov.querySelector(".vnext").hidden = imgs.length < 2;
+  document.addEventListener("keydown", key);
+  document.body.appendChild(ov); show();
+}
+document.addEventListener("click", (e) => {
+  const img = e.target.closest(".ph img");
+  if (!img || e.target.closest(".x")) return;
+  const grid = img.closest(".photos") || img.parentElement;
+  const all = [...grid.querySelectorAll(".ph img")].filter((x) => x.src);
+  openViewer(all.map((x) => x.src), Math.max(0, all.indexOf(img)));
+});
