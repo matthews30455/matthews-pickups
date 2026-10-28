@@ -290,3 +290,6 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .tbl .mini.ghost { background: transparent; color: var(--muted); }
 .tbl .mini.on { background: var(--amber-soft); border-color: var(--amber); color: #8a5a00; }
 .tbl .mini:disabled { opacity: .5; }
+
+.tbl td.fileno { white-space: nowrap; }
+.tbl td.fileno small { display: block; }

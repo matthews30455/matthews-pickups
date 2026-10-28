@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.9.0";
+const VERSION = "1.9.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1209,7 +1209,7 @@ async function loadList() {
     <table class="tbl">
       <thead><tr><th>File #</th><th>Vehicle</th><th>Driver</th><th>Picked up</th><th class="r">Paid</th><th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
       <tbody>${data.map((p) => `<tr data-open="${p.id}">
-        <td class="mono"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
+        <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
         <td>${whenLabel(p.picked_up_at)}</td>
