@@ -254,3 +254,6 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 @media (max-width: 420px) { .selrow { grid-template-columns: 108px 1fr; } }
 .selrow select[name="year"] { padding-left: 12px; padding-right: 28px; }
 .chips button { white-space: nowrap; }
+.vinpicks { display: grid; gap: 8px; width: min(100%, 420px); }
+.vinpicks .btn { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .06em; justify-content: center; }
+.scanov .btnrow { max-width: 520px; }

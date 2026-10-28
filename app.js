@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -131,6 +131,25 @@ function extractVin(text) {
   const all = t.match(/[A-HJ-NPR-Z0-9]{17}/g) || [];
   return all.find(vinCheckOk) || all[0] || "";
 }
+// whole picture plus zoomed, overlapping parts so small windshield VIN text stays readable (same as the shop POS)
+function shrinkJpeg(c, max) { const k = Math.min(1, max / Math.max(c.width, c.height)); if (k >= 1) return c.toDataURL("image/jpeg", 0.82); const d = document.createElement("canvas"); d.width = Math.round(c.width * k); d.height = Math.round(c.height * k); d.getContext("2d").drawImage(c, 0, 0, d.width, d.height); return d.toDataURL("image/jpeg", 0.82); }
+function vinTiles(c) {
+  const out = [shrinkJpeg(c, 1568)], W = c.width, H = c.height; if (Math.max(W, H) < 1400) return out;
+  const g = Math.max(W, H) >= 2400 ? 3 : 2, f = g === 3 ? 0.42 : 0.55, step = (1 - f) / (g - 1), px = g === 3 ? 1200 : 1568;
+  for (let r = 0; r < g; r++) for (let q = 0; q < g; q++) { const t = document.createElement("canvas"), w = Math.round(W * f), h = Math.round(H * f); t.width = w; t.height = h; t.getContext("2d").drawImage(c, Math.round(W * step * q), Math.round(H * step * r), w, h, 0, 0, w, h); out.push(shrinkJpeg(t, px)); }
+  return out;
+}
+/** AI reads the VIN text from a picture. Resolves with [{v, ok, fixed}] or throws with a message. */
+async function aiReadVin(canvas) {
+  if (!navigator.onLine) throw new Error("The AI reader needs internet. Type the VIN instead.");
+  const r = await adminCall({ action: "vinRead", images: vinTiles(canvas) });
+  if (r?.off) throw new Error("The AI VIN reader isn't switched on yet (owner: add the key in Supabase).");
+  if (r?.error) throw new Error(r.error);
+  return r?.list || [];
+}
+async function loadPhoto(file) { const url = URL.createObjectURL(file); try { const i = new Image(); i.src = url; await i.decode(); return i; } finally { setTimeout(() => URL.revokeObjectURL(url), 2000); } }
+function rot90(c) { const r = document.createElement("canvas"); r.width = c.height; r.height = c.width; const x = r.getContext("2d"); x.translate(r.width, 0); x.rotate(Math.PI / 2); x.drawImage(c, 0, 0); return r; }
+
 /** Opens a full-screen camera scanner. Resolves with a VIN, or "" if cancelled. */
 function scanVinBarcode() {
   return new Promise((resolve) => {
@@ -140,47 +159,88 @@ function scanVinBarcode() {
         <video playsinline muted autoplay></video><div class="scanline"></div>
       </div>
       <p class="scanmsg" id="scanMsg">Starting camera…</p>
-      <p class="scantip">Aim at the VIN barcode: driver door frame, windshield corner, or the ownership.</p>
+      <p class="scantip">Aim at the VIN barcode on the driver door frame. No barcode (windshield plate, ownership)? Tap <b>Read VIN numbers (AI)</b>.</p>
+      <div class="vinpicks" id="vinPicks" hidden></div>
       <div class="btnrow center-row">
-        <label class="btn filebtn">📷 Take a photo instead<input type="file" accept="image/*" capture="environment" hidden></label>
+        <button type="button" class="btn primary" id="aiBtn">🔍 Read VIN numbers (AI)</button>
+        <label class="btn filebtn">📷 Take a photo<input type="file" accept="image/*" capture="environment" hidden></label>
         <button type="button" class="btn ghost light" data-close>Cancel</button>
       </div>`;
     document.body.appendChild(ov);
-    const video = ov.querySelector("video"), msg = ov.querySelector("#scanMsg");
-    let reader = null, done = false;
+    const video = ov.querySelector("video"), msg = ov.querySelector("#scanMsg"), picks = ov.querySelector("#vinPicks");
+    let reader = null, stream = null, done = false, ZX = null, hints = null;
     const finish = (vin) => {
       if (done) return; done = true;
       try { reader?.reset(); } catch { /* ignore */ }
-      try { video.srcObject?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+      try { (stream || video.srcObject)?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
       ov.remove(); resolve(vin);
     };
     ov.querySelector("[data-close]").onclick = () => finish("");
-    loadZxing().then((ZX) => {
-      const hints = new Map();
-      hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.CODE_39, ZX.BarcodeFormat.CODE_128, ZX.BarcodeFormat.DATA_MATRIX, ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.PDF_417]);
-      hints.set(ZX.DecodeHintType.TRY_HARDER, true);
-      reader = new ZX.BrowserMultiFormatReader(hints, 250);
-      // photo fallback (works even where live camera is blocked)
-      ov.querySelector("input[type=file]").onchange = async (e) => {
-        const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-        msg.textContent = "Reading photo…";
-        const url = URL.createObjectURL(file);
+
+    const showPicks = (list) => {
+      if (list.length === 1 && list[0].ok && !list[0].fixed) { navigator.vibrate?.(80); return finish(list[0].v); }
+      msg.textContent = list[0].ok ? "Found it. Tap the VIN to use it." : "Check the VIN carefully, then tap it:";
+      picks.innerHTML = list.map((c) => `<button type="button" class="btn" data-v="${c.v}">${c.v}${c.fixed ? " ✓?" : c.ok ? " ✓" : ""}</button>`).join("");
+      picks.hidden = false;
+    };
+    picks.onclick = (e) => { const b = e.target.closest("[data-v]"); if (b) finish(b.dataset.v); };
+    const runAi = async (canvas) => {
+      picks.hidden = true; msg.textContent = "Reading the VIN… (a few seconds)";
+      try {
+        const list = await aiReadVin(canvas);
+        if (done) return;
+        if (!list.length) { msg.textContent = "No VIN found. Get closer so the VIN fills the screen, avoid glare, and try again."; return; }
+        showPicks(list);
+      } catch (err) { if (!done) msg.textContent = err.message; }
+    };
+    ov.querySelector("#aiBtn").onclick = () => {
+      if (!video.videoWidth) { msg.textContent = "Camera isn't on — use Take a photo instead."; return; }
+      const c = document.createElement("canvas"); c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext("2d").drawImage(video, 0, 0); runAi(c);
+    };
+    // photo: barcode first (either way round), then the AI reads the printed VIN
+    ov.querySelector("input[type=file]").onchange = async (e) => {
+      const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+      msg.textContent = "Reading photo…"; picks.hidden = true;
+      let img;
+      try { img = await loadPhoto(file); } catch { msg.textContent = "Couldn't open that photo."; return; }
+      const k = Math.min(1, 3600 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      if (ZX) for (const t of [c, rot90(c)]) {
         try {
-          const vin = extractVin((await reader.decodeFromImageUrl(url)).getText());
+          const rd = new ZX.MultiFormatReader(); rd.setHints(hints);
+          const vin = extractVin(rd.decode(new ZX.BinaryBitmap(new ZX.HybridBinarizer(new ZX.HTMLCanvasElementLuminanceSource(t)))).getText());
           if (vin) return finish(vin);
-          msg.textContent = "Found a barcode but no VIN in it. Try the other barcode, or type the VIN.";
-        } catch { msg.textContent = "Couldn't read a barcode in that photo. Get closer, keep it sharp, or type the VIN."; }
-        finally { URL.revokeObjectURL(url); }
-      };
+        } catch { /* no barcode in this one */ }
+      }
+      runAi(c);
+    };
+
+    // camera on its own, so the AI button works even if the barcode reader can't load
+    (async () => {
       if (!navigator.mediaDevices?.getUserMedia) { msg.textContent = "Live camera isn't available here — take a photo instead."; return; }
-      reader.decodeFromConstraints({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } }, video, (res) => {
-        if (!res) return;
-        const vin = extractVin(res.getText());
-        if (vin) { navigator.vibrate?.(80); finish(vin); }
-        else msg.textContent = "That barcode isn't a VIN — try the other one.";
-      }).then(() => { if (!done) msg.textContent = "Looking for a barcode…"; })
-        .catch(() => { msg.textContent = "Camera is blocked — allow it in Settings, or take a photo instead."; });
-    }).catch((err) => { msg.textContent = err.message; });
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+        if (done) { stream.getTracks().forEach((t) => t.stop()); return; }
+        video.srcObject = stream; await video.play().catch(() => {});
+        msg.textContent = "Looking for a barcode…";
+      } catch { msg.textContent = "Camera is blocked — allow it in Settings, or take a photo instead."; return; }
+      try {
+        ZX = await loadZxing();
+        hints = new Map();
+        hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, [ZX.BarcodeFormat.CODE_39, ZX.BarcodeFormat.CODE_128, ZX.BarcodeFormat.DATA_MATRIX, ZX.BarcodeFormat.QR_CODE, ZX.BarcodeFormat.PDF_417]);
+        hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+        if (done) return;
+        reader = new ZX.BrowserMultiFormatReader(hints, 250);
+        reader.decodeFromStream(stream, video, (res) => {
+          if (!res || done) return;
+          const vin = extractVin(res.getText());
+          if (vin) { navigator.vibrate?.(80); finish(vin); }
+          else msg.textContent = "That barcode isn't a VIN — try the other one, or Read VIN numbers (AI).";
+        }).catch(() => {});
+      } catch { if (!done) msg.textContent = "Barcode reader didn't load — use Read VIN numbers (AI)."; }
+    })();
   });
 }
 
