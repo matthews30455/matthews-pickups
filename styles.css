@@ -282,3 +282,11 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 
 .stat.queue { background: var(--amber-soft); border-color: var(--amber); cursor: pointer; }
 .stat.queue span { white-space: normal; }
+
+/* quick action buttons in the dashboard table */
+.tbl td.acts { white-space: nowrap; }
+.tbl .mini { font: inherit; font-size: 12.5px; font-weight: 700; padding: 5px 9px; border-radius: 8px; border: 1px solid #cfd6e2; background: #fff; color: var(--ink); cursor: pointer; margin: 2px 4px 2px 0; }
+.tbl .mini:hover { border-color: var(--ink); }
+.tbl .mini.ghost { background: transparent; color: var(--muted); }
+.tbl .mini.on { background: var(--amber-soft); border-color: var(--amber); color: #8a5a00; }
+.tbl .mini:disabled { opacity: .5; }

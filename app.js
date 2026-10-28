@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.8.0";
+const VERSION = "1.8.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1197,19 +1197,39 @@ async function loadList() {
   if (!data.length) { el.innerHTML = `<div class="empty">No pickups match.</div>`; return; }
   el.innerHTML = `
     <table class="tbl">
-      <thead><tr><th>File #</th><th>Vehicle</th><th>Driver</th><th>Picked up</th><th class="r">Paid</th><th>Progi</th><th>Files</th></tr></thead>
+      <thead><tr><th>File #</th><th>Vehicle</th><th>Driver</th><th>Picked up</th><th class="r">Paid</th><th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
       <tbody>${data.map((p) => `<tr data-open="${p.id}">
         <td class="mono"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
         <td>${whenLabel(p.picked_up_at)}</td>
         <td class="r">${p.paid ? `<b>${money(p.amount)}</b><small class="muted block">${PAY_LABEL[p.payment_type]}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}</small>` : `<span class="muted">—</span>`}</td>
-        <td>${progiPill(p)}</td>
+        <td class="acts">${p.progi_status === "submitted"
+          ? `<span class="pill green">Progi ✓</span><button class="mini ghost" data-act="progi_status" data-v="pending" data-id="${p.id}" title="Undo">↺</button>`
+          : `${p.progi_status === "queued"
+              ? `<button class="mini on" data-act="progi_status" data-v="pending" data-id="${p.id}" title="Take out of the upload queue">📤 In queue ✕</button>`
+              : `<button class="mini" data-act="progi_status" data-v="queued" data-id="${p.id}" data-photos="${p.photo_paths?.length || 0}">📤 Upload to Progi</button>`}
+             <button class="mini ghost" data-act="progi_status" data-v="submitted" data-id="${p.id}">✓ Submitted</button>`}</td>
+        <td class="acts">${p.qb_status === "done"
+          ? `<span class="pill green">QB ✓</span><button class="mini ghost" data-act="qb_status" data-v="pending" data-id="${p.id}" title="Undo">↺</button>`
+          : `<button class="mini" data-act="qb_status" data-v="done" data-id="${p.id}">✓ QB done</button>`}</td>
         <td class="nowrap">${p.invoice_path ? "📄" : p.paid ? `<span title="No invoice" class="warnc">!</span>` : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</td>
       </tr>`).join("")}</tbody>
     </table>
     <p class="muted small">${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} pickup${data.length > 1 ? "s" : ""}</p>`;
-  $$("[data-open]", el).forEach((r) => (r.onclick = () => go("detail", r.dataset.open)));
+  $$("[data-open]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-act]")) go("detail", r.dataset.open); }));
+  $$("[data-act]", el).forEach((b) => (b.onclick = async (e) => {
+    e.stopPropagation();
+    const { act, v, id } = b.dataset;
+    if (act === "progi_status" && v === "queued" && +b.dataset.photos < PROGI_MIN_PHOTOS &&
+        !confirm(`Only ${b.dataset.photos} photos (Progi needs ${PROGI_MIN_PHOTOS}). Add to the upload queue anyway?`)) return;
+    if (act === "progi_status" && v === "submitted" && !confirm("Mark this file as submitted in Progi?")) return;
+    b.disabled = true;
+    const { error } = await sb.from("pickups").update({ [act]: v }).eq("id", id);
+    if (error) { b.disabled = false; return toast(error.message, "err"); }
+    toast({ queued: "Added to the Progi upload queue", submitted: "Marked submitted to Progi", done: "Marked done in QuickBooks", pending: "Undone" }[v] || "Saved", "ok");
+    loadDash();
+  }));
 }
 
 function exportCsv() {
