@@ -309,3 +309,19 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .toplogo { height: 34px; width: auto; background: #fff; border-radius: 8px; padding: 3px 6px; flex: none; display: block; }
 .login-logo { display: block; width: min(320px, 82%); height: auto; margin: 0 auto 18px; background: #fff; border-radius: 16px; padding: 12px 16px; box-shadow: 0 1px 3px rgba(16,24,40,.08); }
 @media (max-width: 420px) { .toplogo { height: 28px; padding: 2px 4px; } }
+
+/* Progi "to pick up" list */
+.jobs { display: grid; gap: 10px; }
+.job { background: #fff; border: 1px solid #e3e7ee; border-radius: 14px; padding: 12px 14px; display: grid; gap: 6px; }
+.job.late { border-color: #f3b4b4; }
+.job.hold { opacity: .7; }
+.job-top { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.job-veh { font-weight: 700; }
+.job-shop { font-size: .92rem; }
+.job-shop a { color: var(--ink); }
+.job-notes { white-space: pre-wrap; }
+.job-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 2px; }
+.job-act select { font: inherit; padding: 7px 10px; border-radius: 10px; border: 1px solid #d6dbe4; background: #fff; }
+.jobbox .job { background: var(--amber-soft); border-color: #f1d78f; }
+.holdbox summary { cursor: pointer; font-weight: 700; margin: 14px 0 8px; }
+.jobs-head { display: grid; gap: 6px; margin-bottom: 6px; }

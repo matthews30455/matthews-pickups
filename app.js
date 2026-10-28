@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.10.3";
+const VERSION = "1.11.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -369,7 +369,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
   preloadPdf();
   go(isOwner() ? "dash" : "home");
-  if (isOwner()) window.MP = { sb, signedUrl, version: VERSION }; // used when Claude fills Progi from this browser
+  if (isOwner()) window.MP = { sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
   syncOutbox();
   if (navigator.onLine) refreshSuggestions();
 }
@@ -441,8 +441,8 @@ async function logout() {
 // ─────────────────────────────────────────────────────────────── shell
 function shell(inner, { title = "", back = null } = {}) {
   const tabs = isOwner()
-    ? [["dash", "Dashboard"], ["form", "New pickup"], ["drivers", "Drivers"]]
-    : [["home", "My pickups"], ["form", "New pickup"]];
+    ? [["dash", "Dashboard"], ["jobs", "To pick up"], ["form", "New pickup"], ["drivers", "Drivers"]]
+    : [["home", "My pickups"], ["jobs", "To pick up"], ["form", "New pickup"]];
   $("#app").innerHTML = `
     <header class="top">
       ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : ""}<img class="toplogo" src="logo.png" alt="Matthews">
@@ -469,7 +469,8 @@ function go(view, arg) {
   document.body.dataset.view = view;
   window.scrollTo(0, 0);
   if (view === "home") return renderHome();
-  if (view === "form") return isOwner() && !S.drivers.length ? loadDrivers().then(() => renderForm(null)) : renderForm(null);
+  if (view === "form") { const run = () => renderForm(null, arg ? { job: arg } : {}); return isOwner() && !S.drivers.length ? loadDrivers().then(run) : run(); }
+  if (view === "jobs") return renderJobs();
   if (view === "dash") return renderDash();
   if (view === "drivers") return renderDrivers();
   if (view === "detail") return renderDetail(arg);
@@ -634,8 +635,10 @@ function renderForm(existing, opts = {}) {
         ${S.drivers.filter((d) => d.active || d.id === f.driver_id).map((d) => `<option value="${d.id}">${esc(d.full_name)}${d.role === "owner" ? " (me)" : ""}${d.active ? "" : " (off)"}</option>`).join("")}
       </select><em class="hint">Counts in this driver's pickups.</em></label>` : ""}
     <label class="field"><span>File Number *</span>
-      <input name="file_number" class="mono upper" placeholder="MT-A6342" autocapitalize="characters" autocorrect="off" spellcheck="false" value="${esc(f.file_number)}">
+      <input name="file_number" class="mono upper" placeholder="MT-A6342" list="dlJobs" autocapitalize="characters" autocorrect="off" spellcheck="false" value="${esc(f.file_number)}">
+      <datalist id="dlJobs"></datalist>
       <em class="hint" id="dupWarn"></em></label>
+    <div id="jobBox" class="jobbox" hidden></div>
 
     <label class="field"><span>Pickup date &amp; time *</span>
       <input name="picked_up_at" type="datetime-local" value="${esc(f.picked_up_at)}"></label>
@@ -935,6 +938,32 @@ function renderForm(existing, opts = {}) {
   form.file_number.addEventListener("blur", dupCheck);
   if (edit) dupCheck();
 
+  // Progi "to pick up" list: pick a file number -> vehicle, VIN, shop filled in
+  const jobBox = $("#jobBox");
+  const showJob = (j) => { jobBox.hidden = !j; jobBox.innerHTML = j ? jobCard(j, { compact: true }) : ""; };
+  const applyJob = (j) => {
+    if (!j || edit) return;
+    f.file_number = j.file_number; form.file_number.value = j.file_number;
+    if (!f.shop_name && j.shop_name) { f.shop_name = j.shop_name; form.shop_name.value = j.shop_name; }
+    if (j.year && !f.year) f.year = String(j.year);
+    if (j.make && !f.make) f.make = titleMake(j.make);
+    if (j.model && !f.model) f.model = j.model;
+    syncVehicle();
+    if (j.vin && VIN_RE.test(j.vin) && !f.vin) { f.vin = j.vin; form.vin.value = j.vin; runDecode(); }
+    showJob(j); clearBad(form.file_number); dupCheck();
+  };
+  if (!edit) {
+    loadJobs().then(() => {
+      const dl = $("#dlJobs");
+      if (dl) dl.innerHTML = openJobs().map((j) => `<option value="${esc(j.file_number)}">${esc([j.year, j.make, j.model].filter(Boolean).join(" "))}${j.shop_name ? " · " + esc(j.shop_name) : ""}</option>`).join("");
+      if (opts.job) applyJob((S.jobs || []).find((x) => x.file_number === opts.job));
+    }).catch(() => {});
+    form.file_number.addEventListener("change", () => {
+      const j = (S.jobs || []).find((x) => x.file_number === f.file_number);
+      if (j) applyJob(j); else showJob(null);
+    });
+  }
+
   // invoice: existing
   const renderExistingInv = () => {
     const box = $("#invExisting");
@@ -1196,6 +1225,134 @@ async function renderDash() {
   $("#fDriver").value = fl.driver;
   loadDash();
   dailyCleanup();
+}
+
+// ─────────────────────────────────────────────────────────────── Progi "to pick up" list
+const PIX_TICKET = "https://tracking.pix.api.progi.com/towing-tickets/token/";
+const pixToFile = (p) => String(p || "").trim().toUpperCase().replace(/^MT-?A/, "MT-A");
+const fmtPhone = (p) => { const d = String(p || "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p || ""); };
+async function loadJobs(force) {
+  if (S.jobs && !force) return S.jobs;
+  if (!navigator.onLine) return S.jobs || [];
+  const { data, error } = await sb.from("progi_jobs").select("*").in("status", ["open", "hold"]).order("due_date", { ascending: true, nullsFirst: false });
+  if (error) throw error;
+  S.jobs = data || [];
+  return S.jobs;
+}
+const openJobs = () => (S.jobs || []).filter((j) => j.status === "open" && (isOwner() || !j.assigned_driver || j.assigned_driver === S.user.id));
+/** public towing ticket -> job fields */
+function ticketPatch(t) {
+  const L = t.pickup?.pickupLocation || {}, A = L.address || {}, P = L.phoneNumber || {};
+  const pf = (t.fees?.projectedFees || []).slice(-1)[0] || {};
+  const st = t.isCancelled ? "gone" : t.vehicleTrackingFileStatus === "releasedForPickup" ? (t.hasOnHoldIssue ? "hold" : "open")
+    : t.vehicleTrackingFileStatus === "assigned" ? "hold" : "picked";
+  const num = (v) => (v === null || v === undefined || v === "" || isNaN(+v) ? null : +v);
+  return {
+    status: st, year: t.vehicle?.year || null, make: t.vehicle?.make || null, model: t.vehicle?.model || null,
+    vin: (t.vehicle?.identificationNumber?.number || "").toUpperCase() || null, odometer: num(t.vehicle?.odomRead),
+    shop_name: L.name || null, shop_address: [A.addressLine1, A.addressLine2].filter(Boolean).join(", ") || null,
+    shop_city: [A.city, A.state, A.postalCode].filter(Boolean).join(" ") || null,
+    shop_phone: P.number ? P.number + (P.extension ? " x" + P.extension : "") : null,
+    instructions: t.pickup?.pickupInstructions?.notes || null,
+    est_total: num(pf.total), est_date: pf.date ? String(pf.date).slice(0, 10) : null, daily_storage: num(pf.dailyStorage),
+    pickup_from: t.callDate ? String(t.callDate).slice(0, 10) : null, synced_at: new Date().toISOString(),
+  };
+}
+/** owner: re-read every open / on-hold job's towing ticket (status, fees, instructions) */
+async function refreshJobs(progress) {
+  const { data: jobs, error } = await sb.from("progi_jobs").select("file_number, ticket_token").in("status", ["open", "hold"]);
+  if (error) throw error;
+  let done = 0, failed = 0;
+  const queue = [...jobs];
+  await Promise.all([...Array(5)].map(async () => {
+    while (queue.length) {
+      const j = queue.shift();
+      try {
+        const t = await (await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en")).json();
+        const { error: e } = await sb.from("progi_jobs").update(ticketPatch(t)).eq("file_number", j.file_number);
+        if (e) throw e;
+      } catch { failed++; }
+      progress?.(++done, jobs.length);
+    }
+  }));
+  return { total: jobs.length, failed };
+}
+/** owner (Claude runs this): "MTA6474:token:R|H:from:due;..." from the ProgiPix "To be completed" list */
+async function importJobs(str) {
+  const rows = String(str).split(";").map((x) => x.trim()).filter(Boolean).map((x) => {
+    const [pix, tok, st, from, due] = x.split(":");
+    return { file_number: pixToFile(pix), ticket_token: tok, status: st === "H" ? "hold" : "open",
+      pickup_from: from || null, due_date: due && (!from || due >= from) ? due : null };
+  });
+  if (!rows.length) throw new Error("Empty list");
+  const { error } = await sb.from("progi_jobs").upsert(rows, { onConflict: "file_number" });
+  if (error) throw error;
+  const keep = rows.map((r) => r.file_number);
+  const { data: stale } = await sb.from("progi_jobs").select("file_number").in("status", ["open", "hold"]);
+  const gone = (stale || []).map((r) => r.file_number).filter((fn) => !keep.includes(fn));
+  if (gone.length) await sb.from("progi_jobs").update({ status: "gone" }).in("file_number", gone);
+  const r = await refreshJobs();
+  S.jobs = null;
+  return { imported: rows.length, removed: gone.length, ...r };
+}
+
+function jobCard(j, { compact = false } = {}) {
+  const today = dayKey(new Date()), late = j.status === "open" && j.due_date && j.due_date < today;
+  const addr = [j.shop_address, j.shop_city].filter(Boolean).join(", ");
+  const veh = [j.year, j.make, j.model].filter(Boolean).join(" ");
+  const drv = (S.drivers || []).filter((d) => d.active);
+  return `<div class="job ${late ? "late" : ""} ${j.status === "hold" ? "hold" : ""}" data-job="${esc(j.file_number)}">
+    <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>
+      ${j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
+    <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
+    ${j.est_total != null ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : ""}
+    ${j.instructions ? `<div class="small muted job-notes">${esc(j.instructions)}</div>` : ""}
+    ${compact ? "" : `<div class="job-act">
+      ${isOwner() ? `<select class="job-assign" data-assign="${esc(j.file_number)}"><option value="">Not assigned</option>${drv.map((d) => `<option value="${d.id}"${d.id === j.assigned_driver ? " selected" : ""}>${esc(d.full_name)}${d.role === "owner" ? " (me)" : ""}</option>`).join("")}</select>` : ""}
+      ${j.status === "open" ? `<button class="btn primary sm" data-start="${esc(j.file_number)}">Start pickup →</button>` : ""}
+    </div>`}
+  </div>`;
+}
+
+async function renderJobs() {
+  shell(`<div class="jobs-head">
+      <p class="muted small">Cars Progi released for pickup and not picked up yet. Tap <b>Start pickup</b> — the form fills in the file number, vehicle, VIN and shop.</p>
+      ${isOwner() ? `<div class="btnrow"><button class="btn ghost sm" id="jobsRefresh">↻ Update from Progi</button><span class="muted small" id="jobsMsg"></span></div>` : ""}
+    </div>
+    <div id="jobsList"><div class="muted">Loading…</div></div>`, { title: "To pick up" });
+  try {
+    if (isOwner() && !S.drivers.length) await loadDrivers();
+    await loadJobs(true);
+  } catch (e) { $("#jobsList").innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; return; }
+  const fns = S.jobs.map((j) => j.file_number);
+  const { data: done } = fns.length ? await sb.from("pickups").select("file_number").in("file_number", fns) : { data: [] };
+  const inApp = new Set((done || []).map((r) => r.file_number));
+  const list = S.jobs.filter((j) => !inApp.has(j.file_number));
+  const open = list.filter((j) => j.status === "open"), hold = list.filter((j) => j.status === "hold");
+  const mine = open.filter((j) => j.assigned_driver === S.user.id);
+  const others = isOwner() ? open.filter((j) => j.assigned_driver !== S.user.id) : open.filter((j) => !j.assigned_driver);
+  const synced = S.jobs.reduce((m, j) => (j.synced_at > m ? j.synced_at : m), "");
+  $("#jobsList").innerHTML = `
+    ${mine.length ? `<h3 class="section">Assigned to me (${mine.length})</h3><div class="jobs">${mine.map((j) => jobCard(j)).join("")}</div>` : ""}
+    <h3 class="section">${isOwner() ? "Ready for pickup" : "Open — anyone can take"} (${others.length})</h3>
+    <div class="jobs">${others.map((j) => jobCard(j)).join("") || `<div class="empty">Nothing waiting.</div>`}</div>
+    ${isOwner() && hold.length ? `<details class="holdbox"><summary>On hold in Progi (${hold.length})</summary><div class="jobs">${hold.map((j) => jobCard(j)).join("")}</div></details>` : ""}
+    ${synced ? `<p class="muted small">Progi info as of ${esc(dayKey(synced))} ${esc(fmtTime.format(new Date(synced)))}</p>` : ""}`;
+  $$("[data-start]").forEach((b) => (b.onclick = () => go("form", b.dataset.start)));
+  $$("[data-assign]").forEach((sel) => (sel.onchange = async () => {
+    const { error } = await sb.from("progi_jobs").update({ assigned_driver: sel.value || null }).eq("file_number", sel.dataset.assign);
+    if (error) return toast(error.message, "err");
+    toast(sel.value ? "Assigned to " + driverName(sel.value) : "Unassigned", "ok"); renderJobs();
+  }));
+  const rb = $("#jobsRefresh");
+  if (rb) rb.onclick = async () => {
+    rb.disabled = true;
+    try {
+      const r = await refreshJobs((d, n) => { $("#jobsMsg").textContent = `Reading Progi ${d}/${n}…`; });
+      toast(`Updated ${r.total - r.failed} of ${r.total}`, r.failed ? "err" : "ok");
+    } catch (e) { toast(e.message, "err"); }
+    renderJobs();
+  };
 }
 
 async function loadDrivers() {
