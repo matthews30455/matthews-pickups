@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.14.0";
+const VERSION = "1.15.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -370,7 +370,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
   preloadPdf();
   go(isOwner() ? "dash" : "home");
-  if (isOwner()) window.MP = { importPicked, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
+  if (isOwner()) window.MP = { importPicked, enrichPicked, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
   syncOutbox();
   if (navigator.onLine) refreshSuggestions();
 }
@@ -443,7 +443,7 @@ async function logout() {
 function shell(inner, { title = "", back = null } = {}) {
   const tabs = isOwner()
     ? [["dash", "Dashboard"], ["jobs", "To pick up"], ["form", "New pickup"], ["drivers", "Drivers"]]
-    : [["home", "My pickups"], ["jobs", "To pick up"], ["form", "New pickup"]];
+    : [["home", "My pickups"], ["jobs", "To pick up"], ["yard", "In yard"], ["form", "New pickup"]];
   $("#app").innerHTML = `
     <header class="top">
       ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : ""}<img class="toplogo" src="logo.png" alt="Matthews">
@@ -472,6 +472,7 @@ function go(view, arg) {
   if (view === "home") return renderHome();
   if (view === "form") { const run = () => renderForm(null, arg ? { job: arg } : {}); return isOwner() && !S.drivers.length ? loadDrivers().then(run) : run(); }
   if (view === "jobs") return renderJobs();
+  if (view === "yard") { shell(`<div id="pickedWrap"></div>`, { title: "Cars in the yard" }); return renderPickedTab($("#pickedWrap")); }
   if (view === "dash") return renderDash();
   if (view === "drivers") return renderDrivers();
   if (view === "detail") return renderDetail(arg);
@@ -566,7 +567,7 @@ function cardHtml(p) {
   const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
   return `<div class="pcard" ${p._local ? "" : `data-open="${p.id}"`} role="button">
     <div class="pcard-top"><b class="fileno">${esc(p.file_number)}</b>
-      ${p._local ? `<span class="pill amber">Waiting to send</span>` : progiPill(p)}</div>
+      ${p._local ? `<span class="pill amber">Waiting to send</span>` : progiPill(p)}${p.draft ? ` <span class="pill red">Draft — finish it</span>` : ""}</div>
     <div>${esc(veh)} <span class="muted">· ${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}</span>${p.burned ? ` <span class="pill red">Burned</span>` : ""}</div>
     <div class="muted small">${whenLabel(p.picked_up_at || p.recorded_at)}${p.shop_name ? " · " + esc(p.shop_name) : ""}</div>
     <div class="pcard-bot">
@@ -755,7 +756,8 @@ function renderForm(existing, opts = {}) {
     <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Anything the office should know">${esc(f.notes)}</textarea></label>
 
     <p class="err-text" id="formErr"></p>
-    <div class="savebar"><button class="btn primary big" type="submit" id="saveBtn">${edit ? "Save changes" : "Save Pickup"}</button></div>
+    <div class="savebar"><button class="btn primary big" type="submit" id="saveBtn">${edit ? "Save changes" : "Save Pickup"}</button>
+      <button class="btn ghost" type="button" id="draftBtn">💾 Save draft — finish later</button></div>
   </form>`;
 
   if (target) target.innerHTML = html;
@@ -959,7 +961,19 @@ function renderForm(existing, opts = {}) {
     loadJobs().then(() => {
       const dl = $("#dlJobs");
       if (dl) dl.innerHTML = openJobs().map((j) => `<option value="${esc(j.file_number)}">${esc([j.year, j.make, j.model].filter(Boolean).join(" "))}${j.shop_name ? " · " + esc(j.shop_name) : ""}</option>`).join("");
-      if (opts.job) applyJob((S.jobs || []).find((x) => x.file_number === opts.job));
+      if (opts.job) {
+        const j = (S.jobs || []).find((x) => x.file_number === opts.job);
+        if (j) applyJob(j);
+        else sb.from("progi_jobs").select("*").eq("file_number", opts.job).maybeSingle().then(({ data }) => {
+          if (!data) { f.file_number = opts.job; form.file_number.value = opts.job; return; }
+          applyJob(data);
+          if (data.picked_date) {          // already picked up per Progi: use Progi's date
+            f.picked_up_at = localInputValue(new Date(new Date(torontoDayStart(data.picked_date)).getTime() + 12 * 3600e3));
+            form.picked_up_at.value = f.picked_up_at;
+          }
+          if (data.odometer && !f.odometer) { f.odometer = String(data.odometer); form.odometer.value = f.odometer; }
+        });
+      }
     }).catch(() => {});
     form.file_number.addEventListener("change", () => {
       const j = (S.jobs || []).find((x) => x.file_number === f.file_number);
@@ -1061,9 +1075,19 @@ function renderForm(existing, opts = {}) {
   $$(".dropbox[data-for]").forEach((b) => (b.onclick = () => $("#" + b.dataset.for).click()));
   renderPhotos();
 
-  // save
+  // save (a draft only needs the file number; the rest can be finished later)
+  let asDraft = false;
+  $("#draftBtn").onclick = () => { asDraft = true; form.requestSubmit ? form.requestSubmit() : form.onsubmit(new Event("submit")); };
   form.onsubmit = async (e) => {
     e.preventDefault();
+    const draft = asDraft; asDraft = false;
+    if (draft) {
+      if (!f.vehicle_type) f.vehicle_type = typeFromModel(f.model) || "Car";
+      if (!f.make.trim() || !f.model.trim()) { $("#formErr").textContent = "A draft needs at least make and model"; return; }
+      if (!f.picked_up_at) f.picked_up_at = localInputValue(new Date());
+      if (isOwner() && !f.driver_id) f.driver_id = S.user.id;
+      if (f.paid === null) f.paid = false;
+    }
     const errs = [];
     if (f.file_number.trim().length < 2) errs.push(["file_number", "File Number is required"]);
     const pickedAt = f.picked_up_at ? new Date(f.picked_up_at) : null;
@@ -1089,6 +1113,7 @@ function renderForm(existing, opts = {}) {
       if (!f.cheque_date) errs.push(["cheque_date", "Pick the cheque date"]);
     }
     $$(".bad", form).forEach((x) => x.classList.remove("bad"));
+    if (draft) errs.splice(0, errs.length, ...errs.filter(([k]) => ["file_number", "vin", "year", "card_last4"].includes(k)));
     if (errs.length) {
       $("#formErr").textContent = errs.map((x) => x[1]).join(" · ");
       errs.forEach(([k]) => (form.querySelector(`[name="${k}"]`) || form.querySelector(`[data-chips="${k}"]`) || $("#" + k))?.closest(".field")?.classList.add("bad"));
@@ -1131,8 +1156,12 @@ function renderForm(existing, opts = {}) {
       cheque_date: f.paid && f.payment_type === "cheque" ? f.cheque_date : null,
       extras: f.extras,
       notes: f.notes.trim() || null,
+      draft,
       ...(isOwner() && f.driver_id ? { driver_id: f.driver_id } : {}),
     };
+    if (draft && row.paid && !(row.amount > 0 && row.payment_type)) {   // payment not filled yet
+      Object.assign(row, { paid: false, amount: null, hst_included: null, payment_type: null, card_last4: null, cheque_number: null, cheque_date: null });
+    }
     if (row.shop_name) localStorage.setItem("mp-shops", JSON.stringify([row.shop_name, ...shops.filter((s) => s !== row.shop_name)].slice(0, 80)));
 
     try {
@@ -1276,17 +1305,43 @@ async function importPicked(str) {
   S.jobs = null;
   return { imported: rows.length, removed: gone.length };
 }
+/** owner (Claude runs this): "6464:token;..." -> store ticket tokens for picked files and read shop / fees from each towing ticket */
+async function enrichPicked(str) {
+  const pairs = String(str).split(";").map((x) => x.split(":")).filter(([n, t]) => n && t);
+  let done = 0, failed = 0;
+  const queue = [...pairs];
+  await Promise.all([...Array(5)].map(async () => {
+    while (queue.length) {
+      const [n, tok] = queue.shift();
+      const fn = "MT-A" + n;
+      try {
+        const patch = { ticket_token: tok };
+        const res = await fetch(PIX_TICKET + encodeURIComponent(tok) + "?locale=en");
+        if (res.ok) {
+          const t = await res.json();
+          const tp = ticketPatch(t);
+          for (const k of ["shop_name", "shop_address", "shop_city", "shop_phone", "instructions", "est_total", "est_date", "daily_storage", "odometer", "pickup_from"]) if (tp[k] != null) patch[k] = tp[k];
+          if (!patch.vin && tp.vin) patch.vin = tp.vin;
+        }
+        const { error } = await sb.from("progi_jobs").update(patch).eq("file_number", fn).eq("status", "picked");
+        if (error) throw error;
+        done++;
+      } catch { failed++; }
+    }
+  }));
+  return { done, failed };
+}
 async function loadPicked() {
   const [{ data, error }, { data: apps }] = await Promise.all([
     sb.from("progi_jobs").select("file_number, year, make, model, vin, picked_date, pix_status, form_done, synced_at").eq("status", "picked").limit(2000),
-    sb.from("pickups").select("id, file_number, color, progi_status, photo_paths, picked_up_at").limit(2000),
+    sb.from("pickups").select("id, file_number, color, progi_status, photo_paths, picked_up_at, draft").limit(2000),
   ]);
   if (error) throw error;
   const byFile = new Map((apps || []).map((a) => [a.file_number, a]));
   return (data || []).map((r) => ({ ...r, app: byFile.get(r.file_number) || null }));
 }
 async function renderPickedTab(wrap) {
-  const pf = (S.pickedF ||= { st: "", form: "", q: "", from: "", to: "", sort: "picked_date", asc: false });
+  const pf = (S.pickedF ||= { st: isOwner() ? "" : "pickedUp", form: "", q: "", from: "", to: "", sort: "picked_date", asc: false });
   wrap.innerHTML = `
     <section class="card filters">
       <div class="frow">
@@ -1315,20 +1370,21 @@ async function renderPickedTab(wrap) {
     $("#pList").innerHTML = rows.length ? `
       <table class="tbl">
         <thead><tr>${th("file_number", "File #")}<th>Vehicle</th><th>VIN</th>${th("picked_date", "Picked up")}${th("pix_status", "In Progi")}<th>Progi form</th><th>In app</th></tr></thead>
-        <tbody>${rows.map((r) => { const [lbl, cls] = PIX_ST[r.pix_status] || [r.pix_status || "—", ""]; return `<tr ${r.app ? `data-open="${r.app.id}"` : ""}>
+        <tbody>${rows.map((r) => { const [lbl, cls] = PIX_ST[r.pix_status] || [r.pix_status || "—", ""]; return `<tr ${r.app ? `data-open="${r.app.id}"` : `data-new="${esc(r.file_number)}"`} title="${r.app ? "Open" : "Tap to start: photos, invoice, condition"}">
           <td class="mono fileno"><b>${esc(r.file_number)}</b></td>
           <td>${esc([r.year, r.make, r.model].filter(Boolean).join(" "))}${r.app?.color ? `<small class="muted block">${esc(r.app.color)}</small>` : ""}</td>
           <td class="mono small">${esc(r.vin || "—")}</td>
           <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
           <td><span class="pill ${cls}">${esc(lbl)}</span></td>
           <td>${r.form_done ? `<span class="muted">✓ done</span>` : `<span class="latec">To complete</span>`}</td>
-          <td class="nowrap">${r.app ? `${r.app.progi_status === "submitted" ? "✓" : "•"} ${r.app.photo_paths?.length ? "📷" + r.app.photo_paths.length : ""}` : `<span class="muted">—</span>`}</td>
+          <td class="nowrap">${r.app ? `${r.app.draft ? `<span class="pill red">Draft</span> ` : r.app.progi_status === "submitted" ? "✓ " : r.app.progi_status === "queued" ? "📤 " : ""}${r.app.photo_paths?.length ? "📷" + r.app.photo_paths.length : ""}` : `<button class="mini">Start →</button>`}</td>
         </tr>`; }).join("")}</tbody>
       </table>
       <p class="listtotal"><b>${rows.length}</b> car${rows.length > 1 ? "s" : ""}${rows.length !== all.length ? ` of ${all.length}` : ""} · ${Object.entries(PIX_ST).map(([v, [l]]) => `${l} ${rows.filter((r) => r.pix_status === v).length}`).join(" · ")}${synced ? ` <span class="muted">· Progi info as of ${esc(dayKey(synced))}</span>` : ""}</p>`
       : `<div class="empty">${all.length ? "Nothing matches." : "No picked-up list yet — ask Claude: “update the Progi list”."}</div>`;
     $$("[data-psort]").forEach((h) => (h.onclick = () => { const k2 = h.dataset.psort; if (pf.sort === k2) pf.asc = !pf.asc; else { pf.sort = k2; pf.asc = k2 === "file_number"; } draw(); }));
     $$("#pList [data-open]").forEach((tr) => (tr.onclick = () => go("detail", tr.dataset.open)));
+    $$("#pList [data-new]").forEach((tr) => (tr.onclick = () => go("form", tr.dataset.new)));
   };
   draw();
   $("#pSt").onchange = (e) => { pf.st = e.target.value; draw(); };
@@ -1365,7 +1421,7 @@ async function renderDash() {
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
         ${opts ? `<select id="fProgi">${opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>` : ""}
         <input id="fQ" type="search" placeholder="Search: CR-V, 2018 Civic, 6458, VIN, shop, colour…">
-        ${tab === "submitted" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
+        ${tab === "submitted" || tab === "all" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
     </section>
@@ -1615,12 +1671,17 @@ async function loadList() {
   const el = $("#list"); if (!el) return;
   if (error) { el.innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
   S.list = data;
+  S.allRows = [
+    ...jobs.map((j) => ({ file: j.file_number, car: [j.year, j.make, j.model].filter(Boolean).join(" "), color: "", vin: j.vin || "", date: j.status === "hold" ? "on hold" : "to pick up" })),
+    ...data.map((p) => ({ file: p.file_number, car: [p.year, p.make, p.model].filter(Boolean).join(" "), color: p.color || "", vin: p.vin || "", date: dayKey(p.picked_up_at || p.recorded_at) })),
+    ...picked.map((r) => ({ file: r.file_number, car: [r.year, r.make, r.model].filter(Boolean).join(" "), color: "", vin: r.vin || "", date: r.picked_date || "" })),
+  ];
   if (!data.length && !jobs.length && !picked.length) { el.innerHTML = `<div class="empty">Nothing matches.</div>`; return; }
   el.innerHTML = `
     <table class="tbl">
       <thead><tr>${sortTh("file_number", "File #")}<th>Vehicle</th><th>Driver</th>${sortTh("picked_up_at", "Pickup date")}${sortTh("amount", "Paid", "r")}<th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
       <tbody>${jobs.map(jobRow).join("")}${data.map((p) => `<tr data-open="${p.id}">
-        <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
+        <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}${p.draft ? ` <span class="pill red">Draft</span>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
         <td class="nowrap">${(() => { const d = p.picked_up_at || p.recorded_at; return d ? `<b>${dayKey(d)}</b>` : "—"; })()}</td>
@@ -1650,6 +1711,7 @@ async function loadList() {
     loadList();
   }));
   $$("[data-open]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-act]")) go("detail", r.dataset.open); }));
+  $$("[data-new]", el).forEach((r) => (r.onclick = () => go("form", r.dataset.new)));
   $$("[data-jobrow]", el).forEach((r) => (r.onclick = () => { if (r.dataset.st === "open") go("form", r.dataset.jobrow); else toast("On hold in Progi — can't pick up yet", "err"); }));
   $$("[data-act]", el).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
@@ -1697,17 +1759,17 @@ function jobRow(j) {
 }
 function progiPickedRow(r) {
   const [lbl, cls] = PIX_ST[r.pix_status] || [r.pix_status || "—", ""];
-  return `<tr class="pixrow">
+  return `<tr class="pixrow" data-new="${esc(r.file_number)}" title="Tap to start: photos, invoice, condition">
     <td class="mono fileno"><b>${esc(r.file_number)}</b></td>
     <td>${esc([r.year, r.make, r.model].filter(Boolean).join(" "))}<small class="muted block mono">${esc(r.vin || "")}</small></td>
     <td><span class="muted">—</span></td>
     <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
     <td class="r"><span class="muted">—</span></td>
     <td><span class="pill ${cls}">${esc(lbl)}</span>${r.form_done ? "" : ` <small class="latec">form to complete</small>`}</td>
-    <td></td><td><small class="muted">Progi only</small></td>
+    <td></td><td class="nowrap"><button class="mini">Start →</button></td>
   </tr>`;
 }
-const pickedLines = () => S.dashTab === "picked"
+const pickedLines = () => S.dashTab === "all" && S.view === "dash" ? (S.allRows || []) : (S.dashTab === "picked" || S.view === "yard")
   ? (S.pickedRows || []).map((r) => ({ file: r.file_number, car: [r.year, r.make, r.model].filter(Boolean).join(" "), color: r.app?.color || "", vin: r.vin || "", date: r.picked_date || "" }))
   : (S.list || []).map((p) => ({
       file: p.file_number, car: [p.year, p.make, p.model].filter(Boolean).join(" "), color: p.color || "",
@@ -1716,25 +1778,30 @@ const pickedLines = () => S.dashTab === "picked"
 async function copyPickedList() {
   const rows = pickedLines();
   if (!rows.length) return toast("Nothing to copy", "err");
-  const text = `${S.dashTab === "submitted" ? "Submitted" : "Picked up"} — ${rows.length} car${rows.length > 1 ? "s" : ""}\n` +
-    rows.map((r, i) => `${i + 1}. ${r.file} · ${r.car}${r.color ? " · " + r.color : ""}\n   VIN ${r.vin || "—"} · picked up ${r.date}`).join("\n");
+  const text = `${S.view === "dash" && S.dashTab === "submitted" ? "Submitted" : S.view === "dash" && S.dashTab === "all" ? "Cars" : "Picked up"} — ${rows.length} car${rows.length > 1 ? "s" : ""}\n` +
+    rows.map((r, i) => `${i + 1}. ${r.file} · ${r.car}${r.color ? " · " + r.color : ""}\n   VIN ${r.vin || "—"} · ${/^\d/.test(r.date) ? "picked up " : ""}${r.date}`).join("\n");
   try { await navigator.clipboard.writeText(text); toast(`Copied ${rows.length} cars — paste it in a text or email`, "ok"); }
   catch { prompt("Copy this list:", text); }
 }
 function printPickedList() {
   const rows = pickedLines();
   if (!rows.length) return toast("Nothing to print", "err");
-  const w = window.open("", "_blank");
-  if (!w) return toast("Allow pop-ups to print", "err");
+  document.getElementById("printFrame")?.remove();
+  const fr = document.createElement("iframe");
+  fr.id = "printFrame"; fr.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+  document.body.appendChild(fr);
+  const w = fr.contentWindow;
+  w.document.open();
   w.document.write(`<!doctype html><meta charset="utf-8"><title>Picked up cars ${dayKey(new Date())}</title>
     <style>body{font:14px -apple-system,system-ui,sans-serif;margin:24px}h1{font-size:18px;margin:0 0 4px}p{color:#666;margin:0 0 14px}
     table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}th{background:#f3f3f3}
     td.mono{font-family:ui-monospace,Menlo,monospace}td.chk{width:70px}</style>
-    <h1>Matthews — picked up cars</h1><p>${rows.length} cars · printed ${dayKey(new Date())}</p>
-    <table><thead><tr><th>#</th><th>File #</th><th>Vehicle</th><th>Colour</th><th>VIN</th><th>Picked up</th><th>Done ✓</th></tr></thead><tbody>
+    <h1>Matthews — cars</h1><p>${rows.length} cars · printed ${dayKey(new Date())}</p>
+    <table><thead><tr><th>#</th><th>File #</th><th>Vehicle</th><th>Colour</th><th>VIN</th><th>Picked up</th><th>Photos ✓</th></tr></thead><tbody>
     ${rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.file)}</td><td>${esc(r.car)}</td><td>${esc(r.color)}</td><td class="mono">${esc(r.vin)}</td><td>${esc(r.date)}</td><td class="chk"></td></tr>`).join("")}
-    </tbody></table><script>setTimeout(()=>print(),300)<\/script>`);
+    </tbody></table>`);
   w.document.close();
+  setTimeout(() => { try { w.focus(); w.print(); } catch (e) { toast("Couldn't open print: " + e.message, "err"); } }, 300);
 }
 
 function exportCsv() {
@@ -1798,7 +1865,7 @@ async function renderDetail(id) {
   const { data: p, error } = await sb.from("pickups").select("*").eq("id", id).maybeSingle();
   if (error || !p) { $(".main").innerHTML = `<div class="empty">Not found${error ? ": " + esc(error.message) : ""}.</div>`; return; }
   if (isOwner() && !S.drivers.length) await loadDrivers();
-  const canEdit = isOwner() || (p.driver_id === S.user.id && isToday(p.recorded_at));
+  const canEdit = isOwner() || (p.driver_id === S.user.id && (isToday(p.recorded_at) || p.progi_status !== "submitted"));
   const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
 
   shell(`
@@ -1843,8 +1910,12 @@ async function renderDetail(id) {
       <div id="delBox"><button class="btn danger ghost" id="delBtn">Delete pickup…</button></div>
     </section>` : ""}
 
-    ${canEdit ? `<section class="card"><h3>${isOwner() ? "Edit" : "Edit (today only)"}</h3><div id="editMount"></div></section>`
-      : `<p class="muted small center">Only today's pickups can be edited. Ask the office for changes.</p>`}
+    ${!isOwner() && canEdit && p.progi_status !== "submitted" ? `<section class="card stack"><div class="btnrow">${p.progi_status === "queued"
+      ? `<button class="btn ghost" id="drvQueue" data-v="pending">📤 Sent to the office for Progi — take back</button>`
+      : `<button class="btn primary" id="drvQueue" data-v="queued">📤 Done — send to Progi</button>`}</div>
+      <p class="muted small">Tap when photos (and invoice) are complete. You can still edit until it is submitted.</p></section>` : ""}
+    ${canEdit ? `<section class="card"><h3>Edit</h3><div id="editMount"></div></section>`
+      : `<p class="muted small center">Already submitted to Progi. Ask the office for changes.</p>`}
 
     ${isOwner() ? `<section class="card"><h3>History</h3><div id="hist" class="muted small">Loading…</div></section>` : ""}
   `, { title: p.file_number, back: () => go(isOwner() ? "dash" : "home") });
@@ -1855,6 +1926,15 @@ async function renderDetail(id) {
     $("#dlPdf").onclick = async () => { try { location.href = await signedUrl(p.invoice_path, `${p.file_number}.pdf`); } catch (e) { toast(e.message, "err"); } };
   }
   if (canEdit) renderForm(p, { mount: $("#editMount"), onSaved: () => go(isOwner() ? "dash" : "home") });
+  const dq = $("#drvQueue");
+  if (dq) dq.onclick = async () => {
+    const v = dq.dataset.v;
+    if (v === "queued" && p.draft) return toast("Finish the draft first: fill the missing fields and tap Save changes", "err");
+    if (v === "queued" && (p.photo_paths?.length || 0) < PROGI_MIN_PHOTOS && !confirm(`Only ${p.photo_paths?.length || 0} photos (Progi needs ${PROGI_MIN_PHOTOS}). Send anyway?`)) return;
+    const { error: e } = await sb.from("pickups").update({ progi_status: v }).eq("id", p.id);
+    if (e) return toast(e.message, "err");
+    toast(v === "queued" ? "Sent — the office will submit it to Progi" : "Taken back", "ok"); renderDetail(p.id);
+  };
 
   if (!isOwner()) return;
   const aiBtn = $("#feesAiBtn");

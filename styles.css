@@ -351,3 +351,6 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .latec { color: var(--red); font-weight: 700; }
 .tbl tr.pixrow { background: #f8fafc; }
 .filters label.inl { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; color: var(--muted); }
+.savebar #draftBtn { margin-top: 6px; box-shadow: none; background: #fff; font-size: .95rem; padding: 10px; }
+#pList tr[data-new], #list tr[data-new] { cursor: pointer; }
+#pList tr[data-new]:hover, #list tr[data-new]:hover { background: #fff7e0; }
