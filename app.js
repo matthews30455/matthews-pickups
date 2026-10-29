@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.15.0";
+const VERSION = "1.15.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1537,7 +1537,7 @@ function jobCard(j, { compact = false } = {}) {
   const drv = (S.drivers || []).filter((d) => d.active);
   return `<div class="job ${late ? "late" : ""} ${j.status === "hold" ? "hold" : ""}" data-job="${esc(j.file_number)}">
     <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>
-      ${j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
+      ${j.status === "picked" ? `<span class="pill green">Picked up ${esc(j.picked_date || "")}</span>` : j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
     <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
     ${j.est_total == null ? "" : +j.est_total > 0 ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : `<div class="small muted">Nothing to pay (per Progi)</div>`}
     ${j.instructions ? `<div class="small muted job-notes">${esc(j.instructions)}</div>` : ""}
