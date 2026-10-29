@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.11.2";
+const VERSION = "1.12.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -692,14 +692,14 @@ function renderForm(existing, opts = {}) {
         <label class="field"><span>Cheque date *</span><input name="cheque_date" type="date" value="${esc(f.cheque_date)}"></label>
       </div>
 
-      <div class="field"><span>Shop Invoice ${edit ? "" : "*"}</span>
+      <div class="field dropzone" id="invDrop" data-drop="Drop the invoice here"><span>Shop Invoice ${edit ? "" : "*"}</span>
         <div id="invExisting"></div>
         <div id="pages" class="pages"></div>
         <div class="btnrow">
           <label class="btn big dark filebtn">📄 <span id="scanLbl">Scan Invoice</span><input type="file" accept="image/*" capture="environment" id="scanIn" hidden></label>
           <label class="btn ghost filebtn">Upload file (PDF / photo)<input type="file" accept="application/pdf,image/*,.heic,.heif" id="pdfIn" hidden></label>
         </div>
-        <em class="hint">Lay the invoice flat, fill the screen, take one photo per page.</em>
+        <em class="hint">Lay the invoice flat, fill the screen, take one photo per page.<span class="deskonly"> On a computer you can also drag the PDF or photo here.</span></em>
       </div>
     </div>
 
@@ -741,12 +741,13 @@ function renderForm(existing, opts = {}) {
       </div>
     </details>
 
-    <div class="field"><span>Vehicle Photos <em class="muted" id="photoCount"></em></span>
+    <div class="field dropzone" id="photoDrop" data-drop="Drop photos here"><span>Vehicle Photos <em class="muted" id="photoCount"></em></span>
       <em class="hint">4 corners · damage close-up · inside (passenger door open) · engine (if hood opens) · VIN · keys · odometer (if it turns on)</em>
       <div id="photoGrid" class="photos"></div>
       <div class="btnrow">
         <label class="btn filebtn">📷 Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
         <label class="btn ghost filebtn">From gallery<input type="file" accept="image/*,.heic,.heif" multiple id="galIn" hidden></label>
+        <span class="deskonly dropnote">or drag photos here</span>
       </div></div>
 
     <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Anything the office should know">${esc(f.notes)}</textarea></label>
@@ -1000,8 +1001,7 @@ function renderForm(existing, opts = {}) {
     renderPages();
   };
   $("#pdfIn").multiple = true;
-  $("#pdfIn").onchange = async (e) => {
-    const files = [...e.target.files]; e.target.value = "";
+  const addInvoiceFiles = async (files) => {
     if (!files.length) return;
     const pdf = files.find((x) => x.type === "application/pdf" || /\.pdf$/i.test(x.name));
     if (pdf) {
@@ -1015,6 +1015,7 @@ function renderForm(existing, opts = {}) {
     }
     renderPages();
   };
+  $("#pdfIn").onchange = (e) => { const files = [...e.target.files]; e.target.value = ""; addInvoiceFiles(files); };
 
   // photos
   const renderPhotos = () => {
@@ -1042,6 +1043,19 @@ function renderForm(existing, opts = {}) {
   };
   $("#camIn").onchange = (e) => { const fs = [...e.target.files]; e.target.value = ""; addPhotos(fs); };
   $("#galIn").onchange = (e) => { const fs = [...e.target.files]; e.target.value = ""; addPhotos(fs); };
+  // drag & drop from Finder / desktop / Photos
+  const isImg = (f) => /^image\//.test(f.type) || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name);
+  const isPdf = (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+  dropZone($("#photoDrop"), (fs) => {
+    const imgs = fs.filter(isImg);
+    if (!imgs.length) return toast(fs.some(isPdf) ? "That's a PDF — drop it on Shop Invoice" : "Only photos can go here", "err");
+    addPhotos(imgs);
+  });
+  dropZone($("#invDrop"), (fs) => {
+    const ok = fs.filter((f) => isImg(f) || isPdf(f));
+    if (!ok.length) return toast("Drop a PDF or a photo of the invoice", "err");
+    addInvoiceFiles(ok);
+  });
   renderPhotos();
 
   // save
@@ -1180,6 +1194,25 @@ async function loadThumbs(root) {
     n.querySelector(".phload")?.replaceWith(img);
   });
 }
+
+/** Lets files be dragged from the computer onto an element. */
+function dropZone(el, onFiles) {
+  if (!el) return;
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+  el.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; el.classList.add("dragon"); });
+  el.addEventListener("dragover", (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+  el.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; el.classList.remove("dragon"); } });
+  el.addEventListener("drop", (e) => {
+    e.preventDefault(); e.stopPropagation(); depth = 0; el.classList.remove("dragon");
+    const fs = [...(e.dataTransfer?.files || [])];
+    if (fs.length) onFiles(fs);
+    else toast("Couldn't read that — save the file to the computer first, then drag it from Finder", "err");
+  });
+}
+// a file dropped outside a drop area must not open in the tab (and lose the form)
+window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) e.preventDefault(); });
+window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
 async function renderDash() {
@@ -1370,16 +1403,18 @@ async function loadDash() { await Promise.all([loadStats(), loadList()]); }
 
 async function loadStats() {
   const since7 = torontoMidnight(6), today0 = torontoMidnight(0);
-  const [{ data: wk }, { count: pending }, { data: expiring }, { data: queued }] = await Promise.all([
+  const [{ data: wk }, { count: pending }, { data: expiring }, { data: queued }, { data: paidRows }] = await Promise.all([
     sb.from("pickups").select("picked_up_at, paid, amount, payment_type").gte("picked_up_at", since7),
     sb.from("pickups").select("id", { count: "exact", head: true }).neq("progi_status", "submitted"),
     sb.from("pickups").select("id, file_number, recorded_at").neq("progi_status", "submitted")
       .lt("recorded_at", new Date(Date.now() - 10 * 864e5).toISOString()).order("recorded_at").limit(20),
     sb.from("pickups").select("id, file_number").eq("progi_status", "queued").order("picked_up_at").limit(50),
+    // paid today = picked up today OR entered today (a car picked up earlier but entered today still counts)
+    sb.from("pickups").select("id, amount, payment_type").eq("paid", true).or(`picked_up_at.gte.${today0},recorded_at.gte.${today0}`),
   ]);
   const rows = wk || [];
   const today = rows.filter((r) => r.picked_up_at >= today0);
-  const paidToday = today.filter((r) => r.paid);
+  const paidToday = paidRows || [];
   const sum = paidToday.reduce((a, r) => a + Number(r.amount || 0), 0);
   const by = PAY_TYPES.map(([v, l]) => [l, paidToday.filter((r) => r.payment_type === v).reduce((a, r) => a + Number(r.amount || 0), 0)]).filter(([, a]) => a > 0);
   const el = $("#stats"); if (!el) return;
@@ -1442,7 +1477,13 @@ async function loadList() {
         <td class="nowrap">${p.invoice_path ? "📄" : p.paid ? `<span title="No invoice" class="warnc">!</span>` : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</td>
       </tr>`).join("")}</tbody>
     </table>
-    <p class="muted small">${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} pickup${data.length > 1 ? "s" : ""}</p>`;
+    <p class="listtotal">${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} pickup${data.length > 1 ? "s" : ""}${(() => {
+      const paid = data.filter((p) => p.paid);
+      if (!paid.length) return "";
+      const sum = paid.reduce((a, p) => a + Number(p.amount || 0), 0);
+      const by = PAY_TYPES.map(([v, l]) => [l, paid.filter((p) => p.payment_type === v).reduce((a, p) => a + Number(p.amount || 0), 0)]).filter(([, a]) => a > 0);
+      return ` · <b>Paid total ${money(sum)}</b> <span class="muted">(${paid.length} paid${by.length ? ": " + by.map(([l, a]) => `${l} ${money(a)}`).join(" · ") : ""})</span>`;
+    })()}</p>`;
   $$("[data-sort]", el).forEach((h) => (h.onclick = () => {
     const k = h.dataset.sort;
     if (fl.sort === k) fl.asc = !fl.asc; else { fl.sort = k; fl.asc = k === "file_number"; }

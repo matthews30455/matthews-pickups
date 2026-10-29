@@ -325,3 +325,12 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .jobbox .job { background: var(--amber-soft); border-color: #f1d78f; }
 .holdbox summary { cursor: pointer; font-weight: 700; margin: 14px 0 8px; }
 .jobs-head { display: grid; gap: 6px; margin-bottom: 6px; }
+
+/* drag & drop */
+.dropzone { position: relative; border-radius: 12px; transition: background .15s, outline-color .15s; outline: 2px dashed transparent; outline-offset: 4px; }
+.dropzone.dragon { background: #fff7e0; outline-color: #f5b301; }
+.dropzone.dragon::after { content: attr(data-drop); position: absolute; inset: 0; display: grid; place-items: center; font-weight: 700; font-size: 1.1rem; color: #8a6200; background: rgba(255, 247, 224, .85); border-radius: 12px; pointer-events: none; }
+.dropnote { align-self: center; color: #888; font-size: .9rem; }
+.deskonly { display: none; }
+@media (hover: hover) and (pointer: fine) { .deskonly { display: inline; } }
+.listtotal { margin: 10px 4px; font-size: .95rem; }
