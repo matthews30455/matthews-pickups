@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.13.0";
+const VERSION = "1.13.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1274,7 +1274,7 @@ async function renderDash() {
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
         ${opts ? `<select id="fProgi">${opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>` : ""}
         <input id="fQ" type="search" placeholder="Search: CR-V, 2018 Civic, 6458, VIN, shop, colour…">
-        ${tab === "picked" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
+        ${tab === "picked" || tab === "submitted" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
     </section>
@@ -1588,7 +1588,7 @@ function jobRow(j) {
     <td class="mono fileno"><b>${esc(j.file_number)}</b></td>
     <td>${esc([j.year, j.make, j.model].filter(Boolean).join(" "))}<small class="muted block">${esc([j.shop_name, j.shop_city].filter(Boolean).join(" · "))}</small></td>
     <td>${j.assigned_driver ? esc(driverName(j.assigned_driver)) : `<span class="muted">—</span>`}</td>
-    <td class="nowrap">${j.status === "hold" ? `<span class="muted">—</span>` : j.due_date ? `<small class="${late ? "warnc" : "muted"}">${late ? "Late · " : ""}due ${esc(j.due_date)}</small>` : "—"}</td>
+    <td class="nowrap">${j.status === "hold" ? `<span class="muted">—</span>` : j.due_date ? `<small class="${late ? "latec" : "muted"}">${late ? "Late · " : ""}due ${esc(j.due_date)}</small>` : "—"}</td>
     <td class="r">${j.est_total != null && +j.est_total > 0 ? `<span class="muted">≈ ${money(j.est_total)}</span>` : `<span class="muted">—</span>`}</td>
     <td><span class="pill ${j.status === "hold" ? "" : late ? "red" : "amber"}">${j.status === "hold" ? "On hold" : "To pick up"}</span></td>
     <td></td>

@@ -348,3 +348,4 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .tbl tr.jobrow { background: #fffbf0; }
 .tbl tr.jobrow.hold { background: #f6f7f9; color: var(--muted); }
 .tabnote { margin: 0 4px 10px; }
+.latec { color: var(--red); font-weight: 700; }
