@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.12.1";
+const VERSION = "1.13.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -341,7 +341,8 @@ const S = {
   drivers: [],         // owner: all profiles
   suggestions: JSON.parse(localStorage.getItem("mp-sugg") || "[]"),
   shops: JSON.parse(localStorage.getItem("mp-shops-all") || "[]"),
-  filters: { range: "7", from: "", to: "", driver: "", pay: "", progi: "", q: "", sort: "picked_up_at", asc: false },
+  filters: { range: "7", from: "", to: "", driver: "", pay: "", progi: "", pickedProgi: "notsub", q: "", sort: "picked_up_at", asc: false },
+  dashTab: "all",
   list: [],
   outboxCount: 0,
 };
@@ -1217,8 +1218,49 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
+const DASH_TABS = [["all", "Dashboard"], ["topick", "To pick up"], ["picked", "Picked up"], ["submitted", "Submitted"]];
+const STATUS_OPTS = {
+  all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["notsub", "Picked up – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
+  picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
+};
+/** the progi filter that applies on the current dashboard tab */
+const tabProgi = () => S.dashTab === "submitted" ? "submitted" : S.dashTab === "picked" ? (S.filters.pickedProgi || "notsub") : S.filters.progi;
+function dashTabsHtml() {
+  return `<nav class="subtabs" id="dtabs">${DASH_TABS.map(([v, l]) => `<button data-dt="${v}" class="${S.dashTab === v ? "on" : ""}">${l}<span class="cnt" data-cnt="${v}"></span></button>`).join("")}</nav>`;
+}
+function wireDashTabs() {
+  $$("#dtabs [data-dt]").forEach((b) => (b.onclick = () => {
+    const t = b.dataset.dt; if (t === S.dashTab) return;
+    S.dashTab = t;
+    if ((t === "picked" || t === "submitted") && !S.filters.from && !S.filters.to) S.filters.range = "all";
+    renderDash();
+  }));
+  // counts on the tabs
+  (async () => {
+    try {
+      const [{ count: nPicked }, { count: nSub }] = await Promise.all([
+        sb.from("pickups").select("id", { count: "exact", head: true }).neq("progi_status", "submitted"),
+        sb.from("pickups").select("id", { count: "exact", head: true }).eq("progi_status", "submitted"),
+      ]);
+      await loadJobs();
+      const fns = (S.jobs || []).map((j) => j.file_number);
+      const { data: done } = fns.length ? await sb.from("pickups").select("file_number").in("file_number", fns) : { data: [] };
+      const inApp = new Set((done || []).map((r) => r.file_number));
+      const nTo = (S.jobs || []).filter((j) => j.status === "open" && !inApp.has(j.file_number)).length;
+      const set = (k, n) => { const el = $(`[data-cnt="${k}"]`); if (el) el.textContent = n == null ? "" : String(n); };
+      set("topick", nTo); set("picked", nPicked); set("submitted", nSub);
+    } catch { /* counts are optional */ }
+  })();
+}
+
 async function renderDash() {
-  shell(`
+  if (S.dashTab === "topick") {
+    shell(`${dashTabsHtml()}<div id="jobsWrap"></div>`, { title: "Dashboard" });
+    wireDashTabs();
+    return renderJobs($("#jobsWrap"));
+  }
+  const tab = S.dashTab, opts = STATUS_OPTS[tab];
+  shell(`${dashTabsHtml()}
     <section class="stats" id="stats">${["Today", "Last 7 days", "Paid today", "Not in Progi yet"].map((l) => `<div class="stat"><small>${l}</small><b>–</b></div>`).join("")}</section>
     <div id="alerts"></div>
     <section class="card filters">
@@ -1230,12 +1272,15 @@ async function renderDash() {
       <div class="frow">
         <select id="fDriver"><option value="">All drivers</option></select>
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
-        <select id="fProgi"><option value="">Progi: all</option><option value="pending">Progi: pending</option><option value="queued">Progi: upload queue</option><option value="submitted">Progi: submitted</option></select>
+        ${opts ? `<select id="fProgi">${opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>` : ""}
         <input id="fQ" type="search" placeholder="Search: CR-V, 2018 Civic, 6458, VIN, shop, colour…">
+        ${tab === "picked" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
     </section>
+    ${tab === "picked" ? `<p class="muted small tabnote">Cars already picked up and not submitted in Progi yet. <b>Copy list</b> gives file #, car, colour, VIN and pickup date — ready to paste in a text to a driver.</p>` : ""}
     <div id="list"><div class="muted">Loading…</div></div>`, { title: "Dashboard" });
+  wireDashTabs();
 
   const fl = S.filters;
   const custom = () => !!(fl.from || fl.to);
@@ -1248,10 +1293,13 @@ async function renderDash() {
   $("#fFrom").onchange = (e) => { fl.from = e.target.value; setSeg(); loadList(); };
   $("#fTo").onchange = (e) => { fl.to = e.target.value; setSeg(); loadList(); };
   $("#fClearDates").onclick = () => { fl.from = fl.to = ""; setSeg(); loadList(); };
-  $("#fPay").value = fl.pay; $("#fProgi").value = fl.progi; $("#fQ").value = fl.q;
+  $("#fPay").value = fl.pay; $("#fQ").value = fl.q;
+  if ($("#fProgi")) $("#fProgi").value = tab === "picked" ? fl.pickedProgi : fl.progi;
   $("#fDriver").onchange = (e) => { fl.driver = e.target.value; loadList(); };
   $("#fPay").onchange = (e) => { fl.pay = e.target.value; loadList(); };
-  $("#fProgi").onchange = (e) => { fl.progi = e.target.value; loadList(); };
+  if ($("#fProgi")) $("#fProgi").onchange = (e) => { if (tab === "picked") fl.pickedProgi = e.target.value; else fl.progi = e.target.value; loadList(); };
+  if ($("#copyBtn")) $("#copyBtn").onclick = copyPickedList;
+  if ($("#printBtn")) $("#printBtn").onclick = printPickedList;
   let t; $("#fQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { fl.q = e.target.value.trim(); loadList(); }, 300); };
   $("#csvBtn").onclick = exportCsv;
 
@@ -1354,12 +1402,14 @@ function jobCard(j, { compact = false } = {}) {
   </div>`;
 }
 
-async function renderJobs() {
-  shell(`<div class="jobs-head">
+async function renderJobs(target) {
+  const html = `<div class="jobs-head">
       <p class="muted small">Cars Progi released for pickup and not picked up yet. Tap <b>Start pickup</b> — the form fills in the file number, vehicle, VIN and shop.</p>
       ${isOwner() ? `<div class="btnrow"><button class="btn ghost sm" id="jobsRefresh">↻ Update from Progi</button><span class="muted small" id="jobsMsg"></span></div>` : ""}
     </div>
-    <div id="jobsList"><div class="muted">Loading…</div></div>`, { title: "To pick up" });
+    <div id="jobsList"><div class="muted">Loading…</div></div>`;
+  if (target) target.innerHTML = html; else shell(html, { title: "To pick up" });
+  const again = () => (target && S.view === "dash" ? renderDash() : renderJobs());
   try {
     if (isOwner() && !S.drivers.length) await loadDrivers();
     await loadJobs(true);
@@ -1382,7 +1432,7 @@ async function renderJobs() {
   $$("[data-assign]").forEach((sel) => (sel.onchange = async () => {
     const { error } = await sb.from("progi_jobs").update({ assigned_driver: sel.value || null }).eq("file_number", sel.dataset.assign);
     if (error) return toast(error.message, "err");
-    toast(sel.value ? "Assigned to " + driverName(sel.value) : "Unassigned", "ok"); renderJobs();
+    toast(sel.value ? "Assigned to " + driverName(sel.value) : "Unassigned", "ok"); again();
   }));
   const rb = $("#jobsRefresh");
   if (rb) rb.onclick = async () => {
@@ -1391,7 +1441,7 @@ async function renderJobs() {
       const r = await refreshJobs((d, n) => { $("#jobsMsg").textContent = `Reading Progi ${d}/${n}…`; });
       toast(`Updated ${r.total - r.failed} of ${r.total}`, r.failed ? "err" : "ok");
     } catch (e) { toast(e.message, "err"); }
-    renderJobs();
+    again();
   };
 }
 
@@ -1426,8 +1476,8 @@ async function loadStats() {
     <div class="stat wide"><small>Paid today</small><b>${money(sum)}</b><span>${by.length ? by.map(([l, a]) => `${l} ${money(a)}`).join(" · ") : "nothing paid"}</span></div>
     <div class="stat ${pending ? "alert" : ""}" id="pendTile" role="button"><small>Not in Progi yet</small><b>${pending ?? "–"}</b><span>tap to show</span></div>
     ${(queued || []).length ? `<div class="stat wide queue" id="queueTile" role="button"><small>📤 Progi upload queue</small><b>${queued.length}</b><span>${queued.map((r) => esc(r.file_number)).join(" · ")} — ask Claude: “upload the Progi queue”</span></div>` : ""}`;
-  const qt = $("#queueTile"); if (qt) qt.onclick = () => { S.filters.progi = "queued"; S.filters.range = "all"; renderDash(); };
-  $("#pendTile").onclick = () => { S.filters.progi = "pending"; S.filters.range = "all"; renderDash(); };
+  const qt = $("#queueTile"); if (qt) qt.onclick = () => { S.dashTab = "picked"; S.filters.pickedProgi = "queued"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
+  $("#pendTile").onclick = () => { S.dashTab = "picked"; S.filters.pickedProgi = "notsub"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
   const al = $("#alerts");
   if (al) al.innerHTML = (expiring || []).length
     ? `<div class="alertbox">⚠ ${expiring.length} pickup${expiring.length > 1 ? "s are" : " is"} 10+ days old and still not in Progi. Photos and invoice are auto-deleted at 14 days: ${expiring.map((r) => `<a href="#" data-open="${r.id}">${esc(r.file_number)}</a>`).join(", ")}</div>` : "";
@@ -1450,18 +1500,26 @@ async function loadList() {
   } else if (fl.range !== "all") q = q.gte("picked_up_at", torontoMidnight(fl.range === "0" ? 0 : +fl.range - 1));
   if (fl.driver) q = q.eq("driver_id", fl.driver);
   if (fl.pay === "none") q = q.eq("paid", false); else if (fl.pay) q = q.eq("payment_type", fl.pay);
-  if (fl.progi) q = q.eq("progi_status", fl.progi);
+  const pg = tabProgi();
+  const jobsOnly = pg === "topick" || pg === "hold";
+  if (pg === "notsub") q = q.neq("progi_status", "submitted");
+  else if (pg && !jobsOnly) q = q.eq("progi_status", pg);
   // every word must match somewhere (file #, VIN, year, make, model, shop, colour, type); dashes/spaces ignored
   for (const w of normSearch(fl.q)) q = q.ilike("search_text", `%${w}%`);
-  const { data, error } = await q;
+  // the "Dashboard" tab also lists Progi files not picked up yet (open + on hold)
+  const wantJobs = S.dashTab === "all" && (!pg || jobsOnly) && fl.pay !== "none" && !fl.pay;
+  const [{ data, error }, jobs] = await Promise.all([
+    jobsOnly ? Promise.resolve({ data: [] }) : q,
+    wantJobs ? jobsForList(pg, fl) : Promise.resolve([]),
+  ]);
   const el = $("#list"); if (!el) return;
   if (error) { el.innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
   S.list = data;
-  if (!data.length) { el.innerHTML = `<div class="empty">No pickups match.</div>`; return; }
+  if (!data.length && !jobs.length) { el.innerHTML = `<div class="empty">Nothing matches.</div>`; return; }
   el.innerHTML = `
     <table class="tbl">
       <thead><tr>${sortTh("file_number", "File #")}<th>Vehicle</th><th>Driver</th>${sortTh("picked_up_at", "Pickup date")}${sortTh("amount", "Paid", "r")}<th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
-      <tbody>${data.map((p) => `<tr data-open="${p.id}">
+      <tbody>${jobs.map(jobRow).join("")}${data.map((p) => `<tr data-open="${p.id}">
         <td class="mono fileno"><b>${esc(p.file_number)}</b>${p.extras?.length ? ` <small class="muted">${p.extras.join(" ")}</small>` : ""}</td>
         <td>${esc([p.year, p.make, p.model].filter(Boolean).join(" "))}${p.burned ? ` <span class="pill red">Burned</span>` : ""}<small class="muted block">${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))}${p.shop_name ? " · " + esc(p.shop_name) : ""}</small></td>
         <td>${esc(driverName(p.driver_id))}</td>
@@ -1479,7 +1537,7 @@ async function loadList() {
         <td class="nowrap">${p.invoice_path ? "📄" : p.paid ? `<span title="No invoice" class="warnc">!</span>` : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</td>
       </tr>`).join("")}</tbody>
     </table>
-    <p class="listtotal">${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} pickup${data.length > 1 ? "s" : ""}${(() => {
+    <p class="listtotal">${jobs.length ? `${jobs.filter((j) => j.status === "open").length} to pick up · ${jobs.filter((j) => j.status === "hold").length} on hold · ` : ""}${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} picked up${(() => {
       const paid = data.filter((p) => p.paid);
       if (!paid.length) return "";
       const sum = paid.reduce((a, p) => a + Number(p.amount || 0), 0);
@@ -1492,6 +1550,7 @@ async function loadList() {
     loadList();
   }));
   $$("[data-open]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-act]")) go("detail", r.dataset.open); }));
+  $$("[data-jobrow]", el).forEach((r) => (r.onclick = () => { if (r.dataset.st === "open") go("form", r.dataset.jobrow); else toast("On hold in Progi — can't pick up yet", "err"); }));
   $$("[data-act]", el).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
     const { act, v, id } = b.dataset;
@@ -1504,6 +1563,64 @@ async function loadList() {
     toast({ queued: "Added to the Progi upload queue", submitted: "Marked submitted to Progi", done: "Marked done in QuickBooks", pending: "Undone" }[v] || "Saved", "ok");
     loadDash();
   }));
+}
+
+/** Progi files not in the app yet, filtered like the pickup list */
+async function jobsForList(pg, fl) {
+  try { await loadJobs(true); } catch { return []; }
+  const fns = (S.jobs || []).map((j) => j.file_number);
+  const { data: done } = fns.length ? await sb.from("pickups").select("file_number").in("file_number", fns) : { data: [] };
+  const inApp = new Set((done || []).map((r) => r.file_number));
+  const words = normSearch(fl.q);
+  return (S.jobs || []).filter((j) => !inApp.has(j.file_number))
+    .filter((j) => (pg === "topick" ? j.status === "open" : pg === "hold" ? j.status === "hold" : true))
+    .filter((j) => !fl.driver || j.assigned_driver === fl.driver)
+    .filter((j) => {
+      if (!words.length) return true;
+      const t = [j.file_number, j.year, j.make, j.model, j.vin, j.shop_name, j.shop_city].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "");
+      return words.every((w) => t.includes(w));
+    })
+    .sort((a, b) => (a.status === b.status ? String(a.due_date || "9").localeCompare(String(b.due_date || "9")) : a.status === "open" ? -1 : 1));
+}
+function jobRow(j) {
+  const today = dayKey(new Date()), late = j.status === "open" && j.due_date && j.due_date < today;
+  return `<tr class="jobrow ${j.status}" data-jobrow="${esc(j.file_number)}" data-st="${j.status}">
+    <td class="mono fileno"><b>${esc(j.file_number)}</b></td>
+    <td>${esc([j.year, j.make, j.model].filter(Boolean).join(" "))}<small class="muted block">${esc([j.shop_name, j.shop_city].filter(Boolean).join(" · "))}</small></td>
+    <td>${j.assigned_driver ? esc(driverName(j.assigned_driver)) : `<span class="muted">—</span>`}</td>
+    <td class="nowrap">${j.status === "hold" ? `<span class="muted">—</span>` : j.due_date ? `<small class="${late ? "warnc" : "muted"}">${late ? "Late · " : ""}due ${esc(j.due_date)}</small>` : "—"}</td>
+    <td class="r">${j.est_total != null && +j.est_total > 0 ? `<span class="muted">≈ ${money(j.est_total)}</span>` : `<span class="muted">—</span>`}</td>
+    <td><span class="pill ${j.status === "hold" ? "" : late ? "red" : "amber"}">${j.status === "hold" ? "On hold" : "To pick up"}</span></td>
+    <td></td>
+    <td class="nowrap">${j.status === "open" ? `<button class="mini">Start →</button>` : ""}</td>
+  </tr>`;
+}
+const pickedLines = () => (S.list || []).map((p) => ({
+  file: p.file_number, car: [p.year, p.make, p.model].filter(Boolean).join(" "), color: p.color || "",
+  vin: p.vin || "", date: dayKey(p.picked_up_at || p.recorded_at), driver: driverName(p.driver_id),
+}));
+async function copyPickedList() {
+  const rows = pickedLines();
+  if (!rows.length) return toast("Nothing to copy", "err");
+  const text = `Picked up — ${rows.length} car${rows.length > 1 ? "s" : ""}\n` +
+    rows.map((r, i) => `${i + 1}. ${r.file} · ${r.car}${r.color ? " · " + r.color : ""}\n   VIN ${r.vin || "—"} · picked up ${r.date}`).join("\n");
+  try { await navigator.clipboard.writeText(text); toast(`Copied ${rows.length} cars — paste it in a text or email`, "ok"); }
+  catch { prompt("Copy this list:", text); }
+}
+function printPickedList() {
+  const rows = pickedLines();
+  if (!rows.length) return toast("Nothing to print", "err");
+  const w = window.open("", "_blank");
+  if (!w) return toast("Allow pop-ups to print", "err");
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>Picked up cars ${dayKey(new Date())}</title>
+    <style>body{font:14px -apple-system,system-ui,sans-serif;margin:24px}h1{font-size:18px;margin:0 0 4px}p{color:#666;margin:0 0 14px}
+    table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}th{background:#f3f3f3}
+    td.mono{font-family:ui-monospace,Menlo,monospace}td.chk{width:70px}</style>
+    <h1>Matthews — picked up cars</h1><p>${rows.length} cars · printed ${dayKey(new Date())}</p>
+    <table><thead><tr><th>#</th><th>File #</th><th>Vehicle</th><th>Colour</th><th>VIN</th><th>Picked up</th><th>Done ✓</th></tr></thead><tbody>
+    ${rows.map((r, i) => `<tr><td>${i + 1}</td><td class="mono">${esc(r.file)}</td><td>${esc(r.car)}</td><td>${esc(r.color)}</td><td class="mono">${esc(r.vin)}</td><td>${esc(r.date)}</td><td class="chk"></td></tr>`).join("")}
+    </tbody></table><script>setTimeout(()=>print(),300)<\/script>`);
+  w.document.close();
 }
 
 function exportCsv() {
