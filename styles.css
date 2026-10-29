@@ -349,3 +349,5 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .tbl tr.jobrow.hold { background: #f6f7f9; color: var(--muted); }
 .tabnote { margin: 0 4px 10px; }
 .latec { color: var(--red); font-weight: 700; }
+.tbl tr.pixrow { background: #f8fafc; }
+.filters label.inl { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; color: var(--muted); }

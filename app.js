@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.13.1";
+const VERSION = "1.14.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -370,7 +370,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
   preloadPdf();
   go(isOwner() ? "dash" : "home");
-  if (isOwner()) window.MP = { sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
+  if (isOwner()) window.MP = { importPicked, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
   syncOutbox();
   if (navigator.onLine) refreshSuggestions();
 }
@@ -1220,7 +1220,7 @@ window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].
 // ─────────────────────────────────────────────────────────────── owner dashboard
 const DASH_TABS = [["all", "Dashboard"], ["topick", "To pick up"], ["picked", "Picked up"], ["submitted", "Submitted"]];
 const STATUS_OPTS = {
-  all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["notsub", "Picked up – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
+  all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
 };
 /** the progi filter that applies on the current dashboard tab */
@@ -1239,7 +1239,7 @@ function wireDashTabs() {
   (async () => {
     try {
       const [{ count: nPicked }, { count: nSub }] = await Promise.all([
-        sb.from("pickups").select("id", { count: "exact", head: true }).neq("progi_status", "submitted"),
+        sb.from("progi_jobs").select("file_number", { count: "exact", head: true }).eq("status", "picked"),
         sb.from("pickups").select("id", { count: "exact", head: true }).eq("progi_status", "submitted"),
       ]);
       await loadJobs();
@@ -1253,7 +1253,98 @@ function wireDashTabs() {
   })();
 }
 
+const PIX_ST = { pickedUp: ["In yard", "amber"], atAuction: ["At auction", ""], sold: ["Sold", "green"] };
+/** owner (Claude runs this): Progi files that are picked up — "6464|261023|P|1|18|Make|Model|VIN;..." */
+async function importPicked(str) {
+  const st = { P: "pickedUp", A: "atAuction", S: "sold" };
+  const rows = String(str).split(";").map((x) => x.trim()).filter(Boolean).map((x) => {
+    const [n, d, s, f, yy, make, model, vin] = x.split("|");
+    const y = +yy;
+    return { file_number: "MT-A" + n, status: "picked", pix_status: st[s] || s, form_done: f === "1",
+      picked_date: `20${d.slice(0, 2)}-${d.slice(2, 4)}-${d.slice(4, 6)}`, year: yy === "" ? null : (y > 50 ? 1900 + y : 2000 + y),
+      make: make || null, model: model || null, vin: (vin || "").toUpperCase() || null, synced_at: new Date().toISOString() };
+  });
+  if (!rows.length) throw new Error("Empty list");
+  for (let i = 0; i < rows.length; i += 100) {
+    const { error } = await sb.from("progi_jobs").upsert(rows.slice(i, i + 100), { onConflict: "file_number" });
+    if (error) throw error;
+  }
+  const keep = new Set(rows.map((r) => r.file_number));
+  const { data: old } = await sb.from("progi_jobs").select("file_number").eq("status", "picked");
+  const gone = (old || []).map((r) => r.file_number).filter((fn) => !keep.has(fn));
+  if (gone.length) await sb.from("progi_jobs").update({ status: "gone" }).in("file_number", gone);
+  S.jobs = null;
+  return { imported: rows.length, removed: gone.length };
+}
+async function loadPicked() {
+  const [{ data, error }, { data: apps }] = await Promise.all([
+    sb.from("progi_jobs").select("file_number, year, make, model, vin, picked_date, pix_status, form_done, synced_at").eq("status", "picked").limit(2000),
+    sb.from("pickups").select("id, file_number, color, progi_status, photo_paths, picked_up_at").limit(2000),
+  ]);
+  if (error) throw error;
+  const byFile = new Map((apps || []).map((a) => [a.file_number, a]));
+  return (data || []).map((r) => ({ ...r, app: byFile.get(r.file_number) || null }));
+}
+async function renderPickedTab(wrap) {
+  const pf = (S.pickedF ||= { st: "", form: "", q: "", from: "", to: "", sort: "picked_date", asc: false });
+  wrap.innerHTML = `
+    <section class="card filters">
+      <div class="frow">
+        <select id="pSt"><option value="">All picked up</option><option value="pickedUp">In yard (not sold)</option><option value="atAuction">At auction</option><option value="sold">Sold</option></select>
+        <select id="pForm"><option value="">Progi form: any</option><option value="todo">Form not completed</option><option value="done">Form completed</option></select>
+        <label class="inl">From <input type="date" id="pFrom"></label><label class="inl">To <input type="date" id="pTo"></label>
+        <input id="pQ" type="search" placeholder="Search: file #, car, VIN…">
+        <button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>
+      </div>
+    </section>
+    <p class="muted small tabnote">Every car that has a pickup date in Progi (in the yard, at auction or sold). <b>Copy list</b> gives file #, car, VIN and pickup date — ready to paste in a text to a driver.</p>
+    <div id="pList"><div class="muted">Loading…</div></div>`;
+  $("#pSt").value = pf.st; $("#pForm").value = pf.form; $("#pQ").value = pf.q; $("#pFrom").value = pf.from; $("#pTo").value = pf.to;
+  let all = [];
+  try { all = await loadPicked(); } catch (e) { $("#pList").innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; return; }
+  const draw = () => {
+    const words = normSearch(pf.q);
+    let rows = all.filter((r) => (!pf.st || r.pix_status === pf.st) && (!pf.form || (pf.form === "done") === !!r.form_done)
+      && (!pf.from || r.picked_date >= pf.from) && (!pf.to || r.picked_date <= pf.to)
+      && (!words.length || words.every((w) => [r.file_number, r.year, r.make, r.model, r.vin, r.app?.color].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "").includes(w))));
+    const k = pf.sort, dir = pf.asc ? 1 : -1;
+    rows.sort((a, b) => (String(a[k] ?? "").localeCompare(String(b[k] ?? ""), undefined, { numeric: true })) * dir);
+    S.pickedRows = rows;
+    const th = (key, label) => `<th class="sortable ${pf.sort === key ? "on" : ""}" data-psort="${key}">${label} <span class="arrow">${pf.sort === key ? (pf.asc ? "▲" : "▼") : "↕"}</span></th>`;
+    const synced = all.reduce((m, r) => (r.synced_at > m ? r.synced_at : m), "");
+    $("#pList").innerHTML = rows.length ? `
+      <table class="tbl">
+        <thead><tr>${th("file_number", "File #")}<th>Vehicle</th><th>VIN</th>${th("picked_date", "Picked up")}${th("pix_status", "In Progi")}<th>Progi form</th><th>In app</th></tr></thead>
+        <tbody>${rows.map((r) => { const [lbl, cls] = PIX_ST[r.pix_status] || [r.pix_status || "—", ""]; return `<tr ${r.app ? `data-open="${r.app.id}"` : ""}>
+          <td class="mono fileno"><b>${esc(r.file_number)}</b></td>
+          <td>${esc([r.year, r.make, r.model].filter(Boolean).join(" "))}${r.app?.color ? `<small class="muted block">${esc(r.app.color)}</small>` : ""}</td>
+          <td class="mono small">${esc(r.vin || "—")}</td>
+          <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
+          <td><span class="pill ${cls}">${esc(lbl)}</span></td>
+          <td>${r.form_done ? `<span class="muted">✓ done</span>` : `<span class="latec">To complete</span>`}</td>
+          <td class="nowrap">${r.app ? `${r.app.progi_status === "submitted" ? "✓" : "•"} ${r.app.photo_paths?.length ? "📷" + r.app.photo_paths.length : ""}` : `<span class="muted">—</span>`}</td>
+        </tr>`; }).join("")}</tbody>
+      </table>
+      <p class="listtotal"><b>${rows.length}</b> car${rows.length > 1 ? "s" : ""}${rows.length !== all.length ? ` of ${all.length}` : ""} · ${Object.entries(PIX_ST).map(([v, [l]]) => `${l} ${rows.filter((r) => r.pix_status === v).length}`).join(" · ")}${synced ? ` <span class="muted">· Progi info as of ${esc(dayKey(synced))}</span>` : ""}</p>`
+      : `<div class="empty">${all.length ? "Nothing matches." : "No picked-up list yet — ask Claude: “update the Progi list”."}</div>`;
+    $$("[data-psort]").forEach((h) => (h.onclick = () => { const k2 = h.dataset.psort; if (pf.sort === k2) pf.asc = !pf.asc; else { pf.sort = k2; pf.asc = k2 === "file_number"; } draw(); }));
+    $$("#pList [data-open]").forEach((tr) => (tr.onclick = () => go("detail", tr.dataset.open)));
+  };
+  draw();
+  $("#pSt").onchange = (e) => { pf.st = e.target.value; draw(); };
+  $("#pForm").onchange = (e) => { pf.form = e.target.value; draw(); };
+  $("#pFrom").onchange = (e) => { pf.from = e.target.value; draw(); };
+  $("#pTo").onchange = (e) => { pf.to = e.target.value; draw(); };
+  let t; $("#pQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { pf.q = e.target.value.trim(); draw(); }, 200); };
+  $("#copyBtn").onclick = copyPickedList; $("#printBtn").onclick = printPickedList;
+}
+
 async function renderDash() {
+  if (S.dashTab === "picked") {
+    shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
+    wireDashTabs();
+    return renderPickedTab($("#pickedWrap"));
+  }
   if (S.dashTab === "topick") {
     shell(`${dashTabsHtml()}<div id="jobsWrap"></div>`, { title: "Dashboard" });
     wireDashTabs();
@@ -1274,11 +1365,10 @@ async function renderDash() {
         <select id="fPay"><option value="">Any payment</option><option value="none">No payment</option>${PAY_TYPES.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>
         ${opts ? `<select id="fProgi">${opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>` : ""}
         <input id="fQ" type="search" placeholder="Search: CR-V, 2018 Civic, 6458, VIN, shop, colour…">
-        ${tab === "picked" || tab === "submitted" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
+        ${tab === "submitted" ? `<button class="btn" id="copyBtn">📋 Copy list</button><button class="btn ghost" id="printBtn">🖨 Print list</button>` : ""}
         <button class="btn ghost" id="csvBtn">Export CSV</button>
       </div>
     </section>
-    ${tab === "picked" ? `<p class="muted small tabnote">Cars already picked up and not submitted in Progi yet. <b>Copy list</b> gives file #, car, colour, VIN and pickup date — ready to paste in a text to a driver.</p>` : ""}
     <div id="list"><div class="muted">Loading…</div></div>`, { title: "Dashboard" });
   wireDashTabs();
 
@@ -1476,8 +1566,8 @@ async function loadStats() {
     <div class="stat wide"><small>Paid today</small><b>${money(sum)}</b><span>${by.length ? by.map(([l, a]) => `${l} ${money(a)}`).join(" · ") : "nothing paid"}</span></div>
     <div class="stat ${pending ? "alert" : ""}" id="pendTile" role="button"><small>Not in Progi yet</small><b>${pending ?? "–"}</b><span>tap to show</span></div>
     ${(queued || []).length ? `<div class="stat wide queue" id="queueTile" role="button"><small>📤 Progi upload queue</small><b>${queued.length}</b><span>${queued.map((r) => esc(r.file_number)).join(" · ")} — ask Claude: “upload the Progi queue”</span></div>` : ""}`;
-  const qt = $("#queueTile"); if (qt) qt.onclick = () => { S.dashTab = "picked"; S.filters.pickedProgi = "queued"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
-  $("#pendTile").onclick = () => { S.dashTab = "picked"; S.filters.pickedProgi = "notsub"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
+  const qt = $("#queueTile"); if (qt) qt.onclick = () => { S.dashTab = "all"; S.filters.progi = "queued"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
+  $("#pendTile").onclick = () => { S.dashTab = "all"; S.filters.progi = "notsub"; S.filters.range = "all"; S.filters.from = S.filters.to = ""; renderDash(); };
   const al = $("#alerts");
   if (al) al.innerHTML = (expiring || []).length
     ? `<div class="alertbox">⚠ ${expiring.length} pickup${expiring.length > 1 ? "s are" : " is"} 10+ days old and still not in Progi. Photos and invoice are auto-deleted at 14 days: ${expiring.map((r) => `<a href="#" data-open="${r.id}">${esc(r.file_number)}</a>`).join(", ")}</div>` : "";
@@ -1501,21 +1591,31 @@ async function loadList() {
   if (fl.driver) q = q.eq("driver_id", fl.driver);
   if (fl.pay === "none") q = q.eq("paid", false); else if (fl.pay) q = q.eq("payment_type", fl.pay);
   const pg = tabProgi();
-  const jobsOnly = pg === "topick" || pg === "hold";
+  const jobsOnly = pg === "topick" || pg === "hold" || pg === "progi";
   if (pg === "notsub") q = q.neq("progi_status", "submitted");
   else if (pg && !jobsOnly) q = q.eq("progi_status", pg);
   // every word must match somewhere (file #, VIN, year, make, model, shop, colour, type); dashes/spaces ignored
   for (const w of normSearch(fl.q)) q = q.ilike("search_text", `%${w}%`);
   // the "Dashboard" tab also lists Progi files not picked up yet (open + on hold)
-  const wantJobs = S.dashTab === "all" && (!pg || jobsOnly) && fl.pay !== "none" && !fl.pay;
-  const [{ data, error }, jobs] = await Promise.all([
+  const wantJobs = S.dashTab === "all" && (!pg || pg === "topick" || pg === "hold") && !fl.pay;
+  const wantPicked = S.dashTab === "all" && (!pg || pg === "progi") && !fl.pay && !fl.driver;
+  const [{ data, error }, jobs, pickedAll] = await Promise.all([
     jobsOnly ? Promise.resolve({ data: [] }) : q,
     wantJobs ? jobsForList(pg, fl) : Promise.resolve([]),
+    wantPicked ? loadPicked().catch(() => []) : Promise.resolve([]),
   ]);
+  // Progi picked-up files that aren't in the app, same date range + search
+  const inList = new Set((data || []).map((p) => p.file_number));
+  const pfrom = fl.from || (fl.range !== "all" && !fl.to ? dayKey(torontoMidnight(fl.range === "0" ? 0 : +fl.range - 1)) : "");
+  const words = normSearch(fl.q);
+  const picked = pickedAll.filter((r) => !r.app && !inList.has(r.file_number)
+    && (!pfrom || (r.picked_date || "") >= pfrom) && (!fl.to || (r.picked_date || "") <= fl.to)
+    && (!words.length || words.every((w) => [r.file_number, r.year, r.make, r.model, r.vin].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "").includes(w))))
+    .sort((a, b) => String(b.picked_date).localeCompare(String(a.picked_date)));
   const el = $("#list"); if (!el) return;
   if (error) { el.innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
   S.list = data;
-  if (!data.length && !jobs.length) { el.innerHTML = `<div class="empty">Nothing matches.</div>`; return; }
+  if (!data.length && !jobs.length && !picked.length) { el.innerHTML = `<div class="empty">Nothing matches.</div>`; return; }
   el.innerHTML = `
     <table class="tbl">
       <thead><tr>${sortTh("file_number", "File #")}<th>Vehicle</th><th>Driver</th>${sortTh("picked_up_at", "Pickup date")}${sortTh("amount", "Paid", "r")}<th>Progi</th><th>QuickBooks</th><th>Files</th></tr></thead>
@@ -1535,9 +1635,9 @@ async function loadList() {
           ? `<span class="pill green">QB ✓</span><button class="mini ghost" data-act="qb_status" data-v="pending" data-id="${p.id}" title="Undo">↺</button>`
           : `<button class="mini" data-act="qb_status" data-v="done" data-id="${p.id}">✓ QB done</button>`}</td>
         <td class="nowrap">${p.invoice_path ? "📄" : p.paid ? `<span title="No invoice" class="warnc">!</span>` : ""} ${p.photo_paths?.length ? "📷" + p.photo_paths.length : ""}</td>
-      </tr>`).join("")}</tbody>
+      </tr>`).join("")}${picked.map(progiPickedRow).join("")}</tbody>
     </table>
-    <p class="listtotal">${jobs.length ? `${jobs.filter((j) => j.status === "open").length} to pick up · ${jobs.filter((j) => j.status === "hold").length} on hold · ` : ""}${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} picked up${(() => {
+    <p class="listtotal">${jobs.length ? `${jobs.filter((j) => j.status === "open").length} to pick up · ${jobs.filter((j) => j.status === "hold").length} on hold · ` : ""}${data.length}${data.length === 500 ? "+ (showing newest 500)" : ""} in the app${picked.length ? ` · ${picked.length} more picked up (Progi only)` : ""}${(() => {
       const paid = data.filter((p) => p.paid);
       if (!paid.length) return "";
       const sum = paid.reduce((a, p) => a + Number(p.amount || 0), 0);
@@ -1595,14 +1695,28 @@ function jobRow(j) {
     <td class="nowrap">${j.status === "open" ? `<button class="mini">Start →</button>` : ""}</td>
   </tr>`;
 }
-const pickedLines = () => (S.list || []).map((p) => ({
-  file: p.file_number, car: [p.year, p.make, p.model].filter(Boolean).join(" "), color: p.color || "",
-  vin: p.vin || "", date: dayKey(p.picked_up_at || p.recorded_at), driver: driverName(p.driver_id),
-}));
+function progiPickedRow(r) {
+  const [lbl, cls] = PIX_ST[r.pix_status] || [r.pix_status || "—", ""];
+  return `<tr class="pixrow">
+    <td class="mono fileno"><b>${esc(r.file_number)}</b></td>
+    <td>${esc([r.year, r.make, r.model].filter(Boolean).join(" "))}<small class="muted block mono">${esc(r.vin || "")}</small></td>
+    <td><span class="muted">—</span></td>
+    <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
+    <td class="r"><span class="muted">—</span></td>
+    <td><span class="pill ${cls}">${esc(lbl)}</span>${r.form_done ? "" : ` <small class="latec">form to complete</small>`}</td>
+    <td></td><td><small class="muted">Progi only</small></td>
+  </tr>`;
+}
+const pickedLines = () => S.dashTab === "picked"
+  ? (S.pickedRows || []).map((r) => ({ file: r.file_number, car: [r.year, r.make, r.model].filter(Boolean).join(" "), color: r.app?.color || "", vin: r.vin || "", date: r.picked_date || "" }))
+  : (S.list || []).map((p) => ({
+      file: p.file_number, car: [p.year, p.make, p.model].filter(Boolean).join(" "), color: p.color || "",
+      vin: p.vin || "", date: dayKey(p.picked_up_at || p.recorded_at),
+    }));
 async function copyPickedList() {
   const rows = pickedLines();
   if (!rows.length) return toast("Nothing to copy", "err");
-  const text = `Picked up — ${rows.length} car${rows.length > 1 ? "s" : ""}\n` +
+  const text = `${S.dashTab === "submitted" ? "Submitted" : "Picked up"} — ${rows.length} car${rows.length > 1 ? "s" : ""}\n` +
     rows.map((r, i) => `${i + 1}. ${r.file} · ${r.car}${r.color ? " · " + r.color : ""}\n   VIN ${r.vin || "—"} · picked up ${r.date}`).join("\n");
   try { await navigator.clipboard.writeText(text); toast(`Copied ${rows.length} cars — paste it in a text or email`, "ok"); }
   catch { prompt("Copy this list:", text); }
