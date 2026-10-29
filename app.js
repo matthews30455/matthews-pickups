@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.15.1";
+const VERSION = "1.16.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -370,7 +370,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
   preloadPdf();
   go(isOwner() ? "dash" : "home");
-  if (isOwner()) window.MP = { importPicked, enrichPicked, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
+  if (isOwner()) window.MP = { importPicked, enrichPicked, syncFormDone, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
   syncOutbox();
   if (navigator.onLine) refreshSuggestions();
 }
@@ -1331,6 +1331,26 @@ async function enrichPicked(str) {
   }));
   return { done, failed };
 }
+/** owner: the file was completed directly in Progi -> mark it done here (and the app pickup, if any) */
+async function markPixDone(fn, btn) {
+  if (!confirm(`Mark ${fn} as already submitted in Progi?`)) return false;
+  if (btn) btn.disabled = true;
+  const { error } = await sb.from("progi_jobs").update({ form_done: true }).eq("file_number", fn);
+  if (error) { toast(error.message, "err"); if (btn) btn.disabled = false; return false; }
+  await sb.from("pickups").update({ progi_status: "submitted" }).eq("file_number", fn).neq("progi_status", "submitted");
+  toast(fn + " marked submitted", "ok");
+  return true;
+}
+/** owner (Claude runs this from ProgiPix): "done:6421,6425|todo:6459,..." -> Progi form status for picked files;
+ *  app pickups whose Progi form is done become "submitted" */
+async function syncFormDone(str) {
+  const part = (k) => ((String(str).match(new RegExp(k + ":([^|]*)")) || [])[1] || "").split(",").map((x) => x.trim()).filter(Boolean).map((n) => "MT-A" + n);
+  const done = part("done"), todo = part("todo");
+  for (let i = 0; i < done.length; i += 100) await sb.from("progi_jobs").update({ form_done: true, synced_at: new Date().toISOString() }).in("file_number", done.slice(i, i + 100));
+  for (let i = 0; i < todo.length; i += 100) await sb.from("progi_jobs").update({ form_done: false, synced_at: new Date().toISOString() }).in("file_number", todo.slice(i, i + 100));
+  const { data: fixed } = done.length ? await sb.from("pickups").update({ progi_status: "submitted" }).in("file_number", done).neq("progi_status", "submitted").select("file_number") : { data: [] };
+  return { done: done.length, todo: todo.length, appMarkedSubmitted: (fixed || []).map((r) => r.file_number) };
+}
 async function loadPicked() {
   const [{ data, error }, { data: apps }] = await Promise.all([
     sb.from("progi_jobs").select("file_number, year, make, model, vin, picked_date, pix_status, form_done, synced_at").eq("status", "picked").limit(2000),
@@ -1376,7 +1396,7 @@ async function renderPickedTab(wrap) {
           <td class="mono small">${esc(r.vin || "—")}</td>
           <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
           <td><span class="pill ${cls}">${esc(lbl)}</span></td>
-          <td>${r.form_done ? `<span class="muted">✓ done</span>` : `<span class="latec">To complete</span>`}</td>
+          <td class="acts">${r.form_done ? `<span class="muted">✓ done</span>` : `<span class="latec">To complete</span>${isOwner() ? ` <button class="mini ghost" data-pixdone="${esc(r.file_number)}" title="Already submitted directly in Progi">✓ Submitted</button>` : ""}`}</td>
           <td class="nowrap">${r.app ? `${r.app.draft ? `<span class="pill red">Draft</span> ` : r.app.progi_status === "submitted" ? "✓ " : r.app.progi_status === "queued" ? "📤 " : ""}${r.app.photo_paths?.length ? "📷" + r.app.photo_paths.length : ""}` : `<button class="mini">Start →</button>`}</td>
         </tr>`; }).join("")}</tbody>
       </table>
@@ -1384,7 +1404,11 @@ async function renderPickedTab(wrap) {
       : `<div class="empty">${all.length ? "Nothing matches." : "No picked-up list yet — ask Claude: “update the Progi list”."}</div>`;
     $$("[data-psort]").forEach((h) => (h.onclick = () => { const k2 = h.dataset.psort; if (pf.sort === k2) pf.asc = !pf.asc; else { pf.sort = k2; pf.asc = k2 === "file_number"; } draw(); }));
     $$("#pList [data-open]").forEach((tr) => (tr.onclick = () => go("detail", tr.dataset.open)));
-    $$("#pList [data-new]").forEach((tr) => (tr.onclick = () => go("form", tr.dataset.new)));
+    $$("#pList [data-pixdone]").forEach((b) => (b.onclick = async (e) => {
+      e.stopPropagation();
+      if (await markPixDone(b.dataset.pixdone, b)) { const r = all.find((x) => x.file_number === b.dataset.pixdone); if (r) r.form_done = true; draw(); }
+    }));
+    $$("#pList [data-new]").forEach((tr) => (tr.onclick = (e) => { if (!e.target.closest("[data-pixdone]")) go("form", tr.dataset.new); }));
   };
   draw();
   $("#pSt").onchange = (e) => { pf.st = e.target.value; draw(); };
@@ -1711,7 +1735,8 @@ async function loadList() {
     loadList();
   }));
   $$("[data-open]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-act]")) go("detail", r.dataset.open); }));
-  $$("[data-new]", el).forEach((r) => (r.onclick = () => go("form", r.dataset.new)));
+  $$("[data-pixdone]", el).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); markPixDone(b.dataset.pixdone, b).then((ok) => ok && loadList()); }));
+  $$("[data-new]", el).forEach((r) => (r.onclick = (e) => { if (!e.target.closest("[data-pixdone]")) go("form", r.dataset.new); }));
   $$("[data-jobrow]", el).forEach((r) => (r.onclick = () => { if (r.dataset.st === "open") go("form", r.dataset.jobrow); else toast("On hold in Progi — can't pick up yet", "err"); }));
   $$("[data-act]", el).forEach((b) => (b.onclick = async (e) => {
     e.stopPropagation();
@@ -1765,8 +1790,8 @@ function progiPickedRow(r) {
     <td><span class="muted">—</span></td>
     <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
     <td class="r"><span class="muted">—</span></td>
-    <td><span class="pill ${cls}">${esc(lbl)}</span>${r.form_done ? "" : ` <small class="latec">form to complete</small>`}</td>
-    <td></td><td class="nowrap"><button class="mini">Start →</button></td>
+    <td class="acts"><span class="pill ${cls}">${esc(lbl)}</span>${r.form_done ? ` <span class="pill green">Progi ✓</span>` : ` <small class="latec">form to complete</small>${isOwner() ? ` <button class="mini ghost" data-pixdone="${esc(r.file_number)}" title="Already submitted directly in Progi">✓ Submitted</button>` : ""}`}</td>
+    <td></td><td class="nowrap">${r.form_done ? "" : `<button class="mini">Start →</button>`}</td>
   </tr>`;
 }
 const pickedLines = () => S.dashTab === "all" && S.view === "dash" ? (S.allRows || []) : (S.dashTab === "picked" || S.view === "yard")
