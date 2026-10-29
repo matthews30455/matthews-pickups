@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.12.0";
+const VERSION = "1.12.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -699,7 +699,8 @@ function renderForm(existing, opts = {}) {
           <label class="btn big dark filebtn">📄 <span id="scanLbl">Scan Invoice</span><input type="file" accept="image/*" capture="environment" id="scanIn" hidden></label>
           <label class="btn ghost filebtn">Upload file (PDF / photo)<input type="file" accept="application/pdf,image/*,.heic,.heif" id="pdfIn" hidden></label>
         </div>
-        <em class="hint">Lay the invoice flat, fill the screen, take one photo per page.<span class="deskonly"> On a computer you can also drag the PDF or photo here.</span></em>
+        <div class="dropbox deskonly" data-for="pdfIn">⬆ <b>Drop the invoice here</b>, or click to browse<small>PDF · JPG · PNG · HEIC</small></div>
+        <em class="hint">Lay the invoice flat, fill the screen, take one photo per page.</em>
       </div>
     </div>
 
@@ -747,8 +748,8 @@ function renderForm(existing, opts = {}) {
       <div class="btnrow">
         <label class="btn filebtn">📷 Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
         <label class="btn ghost filebtn">From gallery<input type="file" accept="image/*,.heic,.heif" multiple id="galIn" hidden></label>
-        <span class="deskonly dropnote">or drag photos here</span>
-      </div></div>
+      </div>
+      <div class="dropbox deskonly" data-for="galIn">⬆ <b>Drop photos here</b>, or click to browse<small>JPG · PNG · HEIC — many at once</small></div></div>
 
     <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Anything the office should know">${esc(f.notes)}</textarea></label>
 
@@ -1056,6 +1057,7 @@ function renderForm(existing, opts = {}) {
     if (!ok.length) return toast("Drop a PDF or a photo of the invoice", "err");
     addInvoiceFiles(ok);
   });
+  $$(".dropbox[data-for]").forEach((b) => (b.onclick = () => $("#" + b.dataset.for).click()));
   renderPhotos();
 
   // save

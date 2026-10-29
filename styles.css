@@ -331,6 +331,9 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 .dropzone.dragon { background: #fff7e0; outline-color: #f5b301; }
 .dropzone.dragon::after { content: attr(data-drop); position: absolute; inset: 0; display: grid; place-items: center; font-weight: 700; font-size: 1.1rem; color: #8a6200; background: rgba(255, 247, 224, .85); border-radius: 12px; pointer-events: none; }
 .dropnote { align-self: center; color: #888; font-size: .9rem; }
-.deskonly { display: none; }
-@media (hover: hover) and (pointer: fine) { .deskonly { display: inline; } }
+.dropbox { border: 2px dashed #c9ccd3; border-radius: 12px; padding: 22px 12px; margin-top: 10px; text-align: center; color: #555; cursor: pointer; background: #fafbfc; transition: background .15s, border-color .15s; }
+.dropbox:hover, .dragon .dropbox { border-color: #f5b301; background: #fff7e0; color: #333; }
+.dropbox small { display: block; margin-top: 4px; color: #999; font-size: .8rem; }
+.deskonly { display: none !important; }
+@media (hover: hover) and (pointer: fine) { .deskonly { display: block !important; } }
 .listtotal { margin: 10px 4px; font-size: .95rem; }
