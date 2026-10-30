@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.17.0";
+const VERSION = "1.18.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -476,6 +476,7 @@ function go(view, arg) {
   if (view === "dash") return renderDash();
   if (view === "drivers") return renderDrivers();
   if (view === "detail") return renderDetail(arg);
+  if (view === "sheet") return renderSheet(arg);
 }
 
 // ─────────────────────────────────────────────────────────────── outbox sync
@@ -1610,9 +1611,10 @@ function jobCard(j, { compact = false } = {}) {
       ${j.status === "picked" ? `<span class="pill green">Picked up ${esc(j.picked_date || "")}</span>` : j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
     <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
     ${j.est_total == null ? "" : +j.est_total > 0 ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : `<div class="small muted">Nothing to pay (per Progi)</div>`}
-    ${j.instructions ? `<div class="small muted job-notes">${esc(j.instructions)}</div>` : ""}
+    ${j.instructions && isOwner() ? `<div class="small muted job-notes">${esc(j.instructions)}</div>` : ""}
     ${compact ? "" : `<div class="job-act">
       ${isOwner() ? `<select class="job-assign" data-assign="${esc(j.file_number)}"><option value="">Not assigned</option>${drv.map((d) => `<option value="${d.id}"${d.id === j.assigned_driver ? " selected" : ""}>${esc(d.full_name)}${d.role === "owner" ? " (me)" : ""}</option>`).join("")}</select>` : ""}
+      ${j.ticket_token ? `<button class="btn ghost sm" data-sheet="${esc(j.file_number)}">📄 Pickup sheet</button>` : ""}
       ${j.status === "open" ? `<button class="btn primary sm" data-start="${esc(j.file_number)}">Start pickup →</button>` : ""}
     </div>`}
   </div>`;
@@ -1645,6 +1647,7 @@ async function renderJobs(target) {
     ${isOwner() && hold.length ? `<details class="holdbox"><summary>On hold in Progi (${hold.length})</summary><div class="jobs">${hold.map((j) => jobCard(j)).join("")}</div></details>` : ""}
     ${synced ? `<p class="muted small">Progi info as of ${esc(dayKey(synced))} ${esc(fmtTime.format(new Date(synced)))}</p>` : ""}`;
   $$("[data-start]").forEach((b) => (b.onclick = () => go("form", b.dataset.start)));
+  $$("[data-sheet]").forEach((b) => (b.onclick = () => { S.sheetBack = S.view; go("sheet", b.dataset.sheet); }));
   $$("[data-assign]").forEach((sel) => (sel.onchange = async () => {
     const { error } = await sb.from("progi_jobs").update({ assigned_driver: sel.value || null }).eq("file_number", sel.dataset.assign);
     if (error) return toast(error.message, "err");
@@ -1659,6 +1662,55 @@ async function renderJobs(target) {
     } catch (e) { toast(e.message, "err"); }
     again();
   };
+}
+
+/** pickup sheet from Progi's towing ticket — everything except the notes (fee approvals etc. stay in the office) */
+async function renderSheet(fn) {
+  const back = () => go(S.sheetBack || "jobs");
+  shell(`<div id="sheet" class="sheet"><div class="muted">Loading pickup sheet…</div></div>`, { title: "Pickup sheet " + fn, back });
+  const el = $("#sheet");
+  try {
+    const { data: j, error } = await sb.from("progi_jobs").select("file_number, ticket_token").eq("file_number", fn).maybeSingle();
+    if (error) throw error;
+    if (!j?.ticket_token) throw new Error("No pickup sheet for this file yet.");
+    const res = await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en");
+    if (!res.ok) throw new Error("Progi has no pickup sheet for this file right now (it may be on hold).");
+    const t = await res.json();
+    const v = t.vehicle || {}, L = t.pickup?.pickupLocation || {}, A = L.address || {}, P = L.phoneNumber || {}, f = t.fees || {};
+    const addr = [A.addressLine1, A.addressLine2, A.city, A.state, A.postalCode].filter(Boolean).join(", ");
+    const ph = (x) => x?.number ? `<a href="tel:${esc(String(x.number).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(x.number))}</a>${x.extension ? " ext. " + esc(x.extension) : ""}` : "";
+    const alt = typeof L.alternatePhoneNumber === "object" ? L.alternatePhoneNumber : L.alternatePhoneNumber ? { number: L.alternatePhoneNumber } : null;
+    const hrs = Object.entries(L.businessHoursSchedule || {}).filter(([, h]) => h).map(([d, h]) => `${d[0].toUpperCase() + d.slice(1, 3)} ${esc(typeof h === "object" ? [h.open || h.from, h.close || h.to].filter(Boolean).join("–") : h)}`);
+    const row = (k, val) => (val ? `<tr><th>${k}</th><td>${val}</td></tr>` : "");
+    const m2 = (n) => (n == null || n === "" ? "—" : money(+n));
+    const pf = f.projectedFees || [];
+    el.innerHTML = `
+      <div class="sheet-head"><div><h2 class="mono">${esc(pixToFile(t.pixNumber || fn))}</h2>
+        <div class="muted small">Progi pickup sheet · printed ${esc(dayKey(new Date()))}</div></div>
+        <div class="btnrow noprint"><button class="btn sm" id="sheetPrint">🖨 Print / PDF</button></div></div>
+      <section class="card"><h3>Vehicle</h3><table class="skv">
+        ${row("Vehicle", esc([v.year, v.make, v.model].filter(Boolean).join(" ")))}${row("Type", esc(v.type || ""))}
+        ${row("VIN", `<span class="mono">${esc(v.identificationNumber?.number || "")}</span>`)}
+        ${row("Odometer", v.odomRead ? esc(v.odomRead + " " + (v.odomUnit || "")) : "")}${row("Plate", esc(v.licensePlate || ""))}
+      </table></section>
+      <section class="card"><h3>Pick up at</h3><table class="skv">
+        ${row("Name", `<b>${esc(L.name || "")}</b>`)}
+        ${row("Address", addr ? `<a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : "")}
+        ${row("Phone", ph(P))}${row("Other phone", ph(alt))}${row("Hours", hrs.join(" · "))}
+        ${row("Available from", esc(t.callDate ? String(t.callDate).slice(0, 10) : ""))}
+      </table></section>
+      <section class="card"><h3>Fees to pay</h3><table class="skv">
+        ${row("Towing", m2(f.towing))}${row("Other", m2(f.other))}
+        ${row("Storage", f.storage ? `${m2(f.storage.amount)} / day${f.storage.startDate ? " from " + esc(f.storage.startDate) : ""}` : "")}
+      </table>
+      ${pf.length ? `<table class="tbl small"><thead><tr><th>If picked up on</th><th>Towing</th><th>Storage</th><th>Other</th><th>Before tax</th><th>Total</th></tr></thead><tbody>
+        ${pf.map((p) => `<tr><td class="nowrap">${esc(String(p.date || "").slice(0, 10))}</td><td>${m2(p.totalTowing)}</td><td class="small">${esc(String(p.totalStorage ?? ""))}</td><td>${m2(p.totalOther)}</td><td>${m2(p.beforeTaxes)}</td><td><b>${m2(p.total)}</b></td></tr>`).join("")}
+      </tbody></table>` : ""}</section>
+      <section class="card"><h3>Insurance</h3><table class="skv">
+        ${row("Insurer", esc(t.insurance?.insurer?.insurerName || ""))}${row("Claim #", esc(t.insurance?.claim?.claimNumber || ""))}
+      </table></section>`;
+    $("#sheetPrint").onclick = () => window.print();
+  } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 async function loadDrivers() {

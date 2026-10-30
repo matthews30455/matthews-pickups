@@ -357,3 +357,18 @@ body[data-view="detail"] .main { padding-bottom: 40px; }
 #ySeg { max-width: 100%; overflow-x: auto; }
 #ySeg .cnt { font-size: 12px; opacity: .7; margin-left: 2px; }
 #ySeg button { white-space: nowrap; }
+/* pickup sheet */
+.sheet { display: grid; gap: 12px; }
+.sheet-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.sheet-head h2 { margin: 0; }
+.sheet h3 { margin: 0 0 6px; }
+table.skv { width: 100%; border-collapse: collapse; }
+table.skv th { text-align: left; color: var(--muted); font-weight: 650; width: 34%; padding: 6px 8px 6px 0; vertical-align: top; font-size: .9rem; }
+table.skv td { padding: 6px 0; border-bottom: 1px solid #eef0f4; word-break: break-word; }
+.sheet .tbl { margin-top: 10px; }
+.job-act [data-sheet] { margin-right: auto; }
+@media print {
+  header.top, nav.tabs, #outboxBar, .noprint { display: none !important; }
+  body, .main { background: #fff !important; padding: 0 !important; }
+  .sheet .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
+}
