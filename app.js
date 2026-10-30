@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.18.0";
+const VERSION = "1.18.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1689,7 +1689,7 @@ async function renderSheet(fn) {
         <div class="muted small">Progi pickup sheet · printed ${esc(dayKey(new Date()))}</div></div>
         <div class="btnrow noprint"><button class="btn sm" id="sheetPrint">🖨 Print / PDF</button></div></div>
       <section class="card"><h3>Vehicle</h3><table class="skv">
-        ${row("Vehicle", esc([v.year, v.make, v.model].filter(Boolean).join(" ")))}${row("Type", esc(v.type || ""))}
+        ${row("Vehicle", esc([v.year, v.make, v.model].filter(Boolean).join(" ")))}
         ${row("VIN", `<span class="mono">${esc(v.identificationNumber?.number || "")}</span>`)}
         ${row("Odometer", v.odomRead ? esc(v.odomRead + " " + (v.odomUnit || "")) : "")}${row("Plate", esc(v.licensePlate || ""))}
       </table></section>
