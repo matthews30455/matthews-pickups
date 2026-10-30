@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.16.0";
+const VERSION = "1.17.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1360,7 +1360,53 @@ async function loadPicked() {
   const byFile = new Map((apps || []).map((a) => [a.file_number, a]));
   return (data || []).map((r) => ({ ...r, app: byFile.get(r.file_number) || null }));
 }
+/** driver view of a yard car: "need" = no photos yet, "taken" = photos started / sent; finished files are hidden */
+const yardDone = (r) => r.form_done || r.app?.progi_status === "submitted" || r.pix_status !== "pickedUp";
+const yardStage = (r) => (r.app?.photo_paths?.length ? "taken" : "need");
+async function renderYardDriver(wrap) {
+  const pf = (S.yardF ||= { stage: "need", q: "" });
+  wrap.innerHTML = `
+    <section class="card filters">
+      <div class="seg" id="ySeg">${[["need", "📷 Need photos"], ["taken", "✓ Photos taken"], ["", "All"]].map(([v, l]) => `<button data-v="${v}">${l} <span class="cnt" data-c="${v}"></span></button>`).join("")}</div>
+      <input id="pQ" type="search" placeholder="Search: file #, car, VIN…">
+    </section>
+    <p class="muted small tabnote">Cars in the yard that still need work. Tap a car to take photos — <b>Save draft</b> to finish later, <b>Done — send to Progi</b> when finished.</p>
+    <div id="pList"><div class="muted">Loading…</div></div>`;
+  $("#pQ").value = pf.q;
+  let all = [];
+  try { all = (await loadPicked()).filter((r) => !yardDone(r)); } catch (e) { $("#pList").innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; return; }
+  const draw = () => {
+    $$("#ySeg button").forEach((b) => b.classList.toggle("on", b.dataset.v === pf.stage));
+    $$("#ySeg [data-c]").forEach((c) => (c.textContent = c.dataset.c ? all.filter((r) => yardStage(r) === c.dataset.c).length : all.length));
+    const words = normSearch(pf.q);
+    const rows = all.filter((r) => (!pf.stage || yardStage(r) === pf.stage)
+      && (!words.length || words.every((w) => [r.file_number, r.year, r.make, r.model, r.vin, r.app?.color].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "").includes(w))))
+      .sort((a, b) => String(b.picked_date || "").localeCompare(String(a.picked_date || "")));
+    S.pickedRows = rows;
+    $("#pList").innerHTML = rows.length ? `
+      <table class="tbl">
+        <thead><tr><th>File #</th><th>Vehicle</th><th>VIN</th><th>Picked up</th><th>Photos</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr ${r.app ? `data-open="${r.app.id}"` : `data-new="${esc(r.file_number)}"`}>
+          <td class="mono fileno"><b>${esc(r.file_number)}</b></td>
+          <td>${esc([r.year, r.make, r.model].filter(Boolean).join(" "))}${r.app?.color ? `<small class="muted block">${esc(r.app.color)}</small>` : ""}</td>
+          <td class="mono small">${esc(r.vin || "—")}</td>
+          <td class="nowrap"><b>${esc(r.picked_date || "—")}</b></td>
+          <td class="nowrap">${!r.app ? `<button class="mini">📷 Start →</button>`
+            : r.app.progi_status === "queued" ? `<span class="pill green">Sent</span> 📷${r.app.photo_paths?.length || 0}`
+            : `${r.app.photo_paths?.length ? `<span class="pill amber">Draft</span> 📷${r.app.photo_paths.length}` : `<button class="mini">📷 Continue →</button>`}`}</td>
+        </tr>`).join("")}</tbody>
+      </table>
+      <p class="listtotal"><b>${rows.length}</b> car${rows.length === 1 ? "" : "s"}</p>`
+      : `<div class="empty">${pf.stage === "need" ? "Nothing left to photograph 👍" : "Nothing here."}</div>`;
+    $$("#pList [data-open]").forEach((tr) => (tr.onclick = () => go("detail", tr.dataset.open)));
+    $$("#pList [data-new]").forEach((tr) => (tr.onclick = () => go("form", tr.dataset.new)));
+  };
+  draw();
+  $$("#ySeg button").forEach((b) => (b.onclick = () => { pf.stage = b.dataset.v; draw(); }));
+  let t; $("#pQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { pf.q = e.target.value.trim(); draw(); }, 200); };
+}
 async function renderPickedTab(wrap) {
+  if (!isOwner()) return renderYardDriver(wrap);
   const pf = (S.pickedF ||= { st: isOwner() ? "" : "pickedUp", form: "", q: "", from: "", to: "", sort: "picked_date", asc: false });
   wrap.innerHTML = `
     <section class="card filters">
