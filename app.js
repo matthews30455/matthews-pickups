@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.18.1";
+const VERSION = "1.19.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -367,7 +367,9 @@ async function boot() {
   window.addEventListener("online", () => { updateNet(); syncOutbox(); });
   window.addEventListener("offline", updateNet);
   setInterval(syncOutbox, 60000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) syncOutbox(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { syncOutbox(); autoSyncJobs(); } });
+  setInterval(() => autoSyncJobs(), 5 * 60 * 1000);
+  setTimeout(() => autoSyncJobs(), 4000);
   preloadPdf();
   go(isOwner() ? "dash" : "home");
   if (isOwner()) window.MP = { importPicked, enrichPicked, syncFormDone, sb, signedUrl, version: VERSION, importJobs, refreshJobs }; // used when Claude fills Progi from this browser
@@ -1536,7 +1538,13 @@ async function loadJobs(force) {
   if (!navigator.onLine) return S.jobs || [];
   const { data, error } = await sb.from("progi_jobs").select("*").in("status", ["open", "hold"]).order("due_date", { ascending: true, nullsFirst: false });
   if (error) throw error;
-  S.jobs = data || [];
+  // a car this device already saw as picked up / cancelled in Progi stays off the list even if the database is behind
+  S.jobs = (data || []).filter((j) => {
+    const o = S.jobOverride?.[j.file_number];
+    if (!o) return true;
+    if (o === "open" || o === "hold") { j.status = o; return true; }
+    return false;
+  });
   return S.jobs;
 }
 const openJobs = () => (S.jobs || []).filter((j) => j.status === "open" && (isOwner() || !j.assigned_driver || j.assigned_driver === S.user.id));
@@ -1556,7 +1564,46 @@ function ticketPatch(t) {
     instructions: t.pickup?.pickupInstructions?.notes || null,
     est_total: num(pf.total), est_date: pf.date ? String(pf.date).slice(0, 10) : null, daily_storage: num(pf.dailyStorage),
     pickup_from: t.callDate ? String(t.callDate).slice(0, 10) : null, synced_at: new Date().toISOString(),
+    ...(st === "picked" ? { pix_status: t.vehicleTrackingFileStatus || null,
+      picked_date: (t.fees?.storage?.endDate ? String(t.fees.storage.endDate).slice(0, 10) : null) || dayKey(new Date()) } : {}),
   };
+}
+/** every app (owner or driver) re-reads Progi for the open / on-hold cars: cars Progi shows as picked up, cancelled
+ *  or put on hold leave the "To pick up" list by themselves. Throttled per device. */
+const JOB_SYNC_MS = 15 * 60 * 1000;
+S.jobOverride = {};
+let jobSyncRunning = false;
+async function autoSyncJobs(force) {
+  if (jobSyncRunning || !navigator.onLine || !S.user) return 0;
+  let last = 0; try { last = +localStorage.getItem("mpJobSync") || 0; } catch {}
+  if (!force && Date.now() - last < JOB_SYNC_MS) return 0;
+  jobSyncRunning = true;
+  try { localStorage.setItem("mpJobSync", String(Date.now())); } catch {}
+  let changed = 0;
+  try {
+    const { data: jobs } = await sb.from("progi_jobs").select("file_number, ticket_token, status").in("status", ["open", "hold"]).not("ticket_token", "is", null);
+    const queue = [...(jobs || [])];
+    await Promise.all([...Array(5)].map(async () => {
+      while (queue.length) {
+        const j = queue.shift();
+        try {
+          const res = await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en");
+          if (!res.ok) continue;
+          const t = await res.json();
+          if (!t.pixNumber) continue;
+          const p = ticketPatch(t);
+          if (isOwner()) await sb.from("progi_jobs").update(p).eq("file_number", j.file_number);
+          if (p.status !== j.status) {
+            changed++;
+            S.jobOverride[j.file_number] = p.status;
+            if (!isOwner()) await sb.rpc("sync_job_ticket", { fn: j.file_number, st: p.status, pix: p.pix_status || null, picked: p.picked_date || null }).then(() => {}, () => {});
+          }
+        } catch {}
+      }
+    }));
+  } finally { jobSyncRunning = false; }
+  if (changed) S.jobs = null;
+  return changed;
 }
 /** owner: re-read every open / on-hold job's towing ticket (status, fees, instructions) */
 async function refreshJobs(progress) {
@@ -1653,6 +1700,7 @@ async function renderJobs(target) {
     if (error) return toast(error.message, "err");
     toast(sel.value ? "Assigned to " + driverName(sel.value) : "Unassigned", "ok"); again();
   }));
+  autoSyncJobs().then((n) => { if (n && (S.view === "jobs" || (S.view === "dash" && S.dashTab === "topick"))) again(); });
   const rb = $("#jobsRefresh");
   if (rb) rb.onclick = async () => {
     rb.disabled = true;
