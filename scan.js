@@ -71,7 +71,7 @@ const toBlob = (canvas, type, q) =>
   new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("Could not encode image"))), type, q));
 
 /** Vehicle photo → JPEG, longest side ≤ maxSide. Always JPEG, so HEIC never reaches the server. */
-export async function compressPhoto(file, maxSide = 1600, quality = 0.75) {
+export async function compressPhoto(file, maxSide = 2048, quality = 0.85) {
   const img = await loadImage(file);
   const [w, h] = fit(img.naturalWidth, img.naturalHeight, maxSide);
   const c = canvasOf(w, h);
@@ -84,7 +84,7 @@ export async function compressPhoto(file, maxSide = 1600, quality = 0.75) {
  * Removes shadows by dividing by an estimate of the paper brightness, then stretches contrast.
  * Returns a canvas (grayscale) the caller can rotate / encode.
  */
-export async function scanInvoice(file, maxSide = 1700) {
+export async function scanInvoice(file, maxSide = 2600) {
   const img = await loadImage(file);
   const [w, h] = fit(img.naturalWidth, img.naturalHeight, maxSide);
   const c = canvasOf(w, h);
@@ -154,7 +154,49 @@ export async function scanInvoice(file, maxSide = 1700) {
     px[j] = px[j + 1] = px[j + 2] = v; px[j + 3] = 255;
   }
   ctx.putImageData(id, 0, 0);
-  return c;
+  return rotateCanvas(c, uprightTurns(c));
+}
+
+/**
+ * Guess how many 90° turns make the text on a scanned page run left-to-right.
+ * Lines of text make the ink profile "stripy" along one axis; if the stripes run vertically the page is sideways.
+ * Which way to turn: lines of left-aligned text all start at the same spot, so the aligned end is the start of the line.
+ * Returns 0 (already upright), 1 (turn clockwise) or 3 (turn counter-clockwise).
+ */
+export function uprightTurns(c) {
+  const [w, h] = fit(c.width, c.height, 600);
+  const t = canvasOf(w, h), x = t.getContext("2d", { willReadFrequently: true });
+  x.drawImage(c, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data;
+  const ink = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < w * h; i++, j += 4) ink[i] = d[j] < 110 ? 1 : 0;
+  const rows = new Float64Array(h), cols = new Float64Array(w);
+  for (let y = 0; y < h; y++) for (let xx = 0; xx < w; xx++) if (ink[y * w + xx]) { rows[y]++; cols[xx]++; }
+  // between lines of text there are completely blank rows; blank columns are rare because word gaps don't line up.
+  // So inside the inked area: many blank rows = text is horizontal, many blank columns = the page is sideways.
+  const span = (a) => { let lo = 0, hi = a.length - 1; while (lo < hi && !a[lo]) lo++; while (hi > lo && !a[hi]) hi--; return [lo, hi]; };
+  const blank = (a) => { const [lo, hi] = span(a); let n = 0; for (let i = lo; i <= hi; i++) if (a[i] <= 1) n++; return n / Math.max(1, hi - lo + 1); };
+  const rs = blank(rows), cs = blank(cols);
+  if (!(cs > 0.08 && cs > rs * 1.5)) return 0;         // text runs left-right (or unsure): leave as is
+  // sideways: each text column is a line; compare how aligned the line starts are at the top vs the bottom
+  const tops = [], bots = [];
+  for (let xx = 0; xx < w; xx++) {
+    if (cols[xx] < 4) continue;
+    let a = -1, b = -1;
+    for (let y = 0; y < h; y++) if (ink[y * w + xx]) { if (a < 0) a = y; b = y; }
+    tops.push(a); bots.push(b);
+  }
+  // share of lines that start / end at the same spot (±1 px on the small image): the aligned side is the left margin
+  const aligned = (v) => { const hgm = new Map(); for (const p of v) { const k = p >> 1; hgm.set(k, (hgm.get(k) || 0) + 1); }
+    let best = 0; for (const [k, n] of hgm) best = Math.max(best, n + (hgm.get(k - 1) || 0) + (hgm.get(k + 1) || 0)); return best / Math.max(1, v.length); };
+  // lines aligned at the top → the left margin is at the top (page turned clockwise) → turn it back counter-clockwise
+  const at = aligned(tops), ab = aligned(bots);
+  if (Math.abs(at - ab) > 0.05) return at > ab ? 3 : 1;
+  // both ends line up (tables, right-aligned amounts): the top of an invoice (logo, addresses) carries more ink,
+  // and a page turned clockwise has its top on the right
+  let left = 0, right = 0;
+  for (let xx = 0; xx < w; xx++) (xx < w / 2 ? (left += cols[xx]) : (right += cols[xx]));
+  return right >= left ? 3 : 1;
 }
 
 /** Rotate a canvas by 90° steps. */
@@ -193,7 +235,7 @@ export async function buildPdf(canvases, title = "Invoice") {
     if (i) doc.addPage("letter", "portrait");
     const s = Math.min((PW - 2 * M) / c.width, (PH - 2 * M) / c.height);
     const w = c.width * s, h = c.height * s;
-    doc.addImage(c.toDataURL("image/jpeg", 0.6), "JPEG", (PW - w) / 2, M, w, h, undefined, "FAST");
+    doc.addImage(c.toDataURL("image/jpeg", 0.85), "JPEG", (PW - w) / 2, M, w, h, undefined, "MEDIUM");
   });
   doc.setProperties({ title });
   return doc.output("blob");
