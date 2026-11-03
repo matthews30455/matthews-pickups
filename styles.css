@@ -467,3 +467,4 @@ body { background: var(--bg); }
 .st-hold { --c: #7b8190; --cs: #e6e8ed; }
 .fcard.is-hold { background: repeating-linear-gradient(135deg, #f6f7f9 0 12px, #eff1f4 12px 24px); box-shadow: none; border: 1px dashed #c9cdd6; }
 .fcard.is-hold .fhead, .fcard.is-hold .fline { color: #6b7180; }
+.board > .btn.huge { min-height: 56px; font-size: 1.15rem; margin-bottom: 4px; }

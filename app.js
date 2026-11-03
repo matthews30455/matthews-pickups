@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.30.0";
+const VERSION = "1.32.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -561,25 +561,81 @@ async function sendItem(it) {
 }
 
 // ─────────────────────────────────────────────────────────────── driver home
+// driver home: same look as the office board — stage pills, search, one card per car
+const HSTAGES = [
+  ["all", "All", "st-grey"],
+  ["photos", "Needs photos", "st-red"],
+  ["finish", "Finish file", "st-blue"],
+  ["sent", "Sent to office", "st-purple"],
+  ["done", "Done", "st-green"],
+];
+const HSTAGE = Object.fromEntries(HSTAGES.map(([k, l, c]) => [k, { label: l, cls: c }]));
+function homeStage(p) {
+  if (p._local) return "sent";
+  if (p.progi_status === "submitted") return "done";
+  if (p.progi_status === "queued") return "sent";
+  if (!(p.photo_paths || []).length) return "photos";
+  return "finish";
+}
+function homeCard(p) {
+  const st = HSTAGE[p.stage];
+  const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
+  const n = (p.photo_paths || []).length;
+  const miss = p.stage === "finish" || p.stage === "photos" ? fileMissing({ app: p }) : [];
+  const chips = [`<span class="schip ${st.cls}">${esc(p._local ? "Waiting to send" : st.label)}</span>`];
+  if (p.burned) chips.push(`<span class="schip st-red">🔥 Burned</span>`);
+  return `<article class="fcard ${st.cls}">
+    <div class="fhead"><b class="mono">${esc(p.file_number)}</b><span class="fveh">${esc(veh || "—")}${p.color ? ` <span class="muted">· ${esc(p.color)}</span>` : ""}</span></div>
+    <div class="fchips">${chips.join("")}</div>
+    <div class="fline">Picked up <b>${esc(dayKey(p.picked_up_at || p.recorded_at || Date.now()))}</b>${p.shop_name ? ` · ${esc(p.shop_name)}` : ""}</div>
+    <div class="fline">${p.paid ? `<b>${money(p.amount)}</b> ${esc(PAY_LABEL[p.payment_type] || "")}` : "No payment"} · 📷 ${n}${p.invoice_path ? " · 🧾 invoice" : ""}</div>
+    ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
+    ${p._local ? "" : `<div class="facts"><button class="btn ${["photos", "finish"].includes(p.stage) ? "primary" : "ghost"} sm" data-open="${p.id}">${p.stage === "photos" ? "📷 Add photos →" : p.stage === "finish" ? "Finish file →" : "Open"}</button></div>`}
+  </article>`;
+}
 async function renderHome() {
+  const hf = (S.home ||= { stage: "all", q: "" });
   shell(`
-    <button class="btn primary huge" data-go="form">＋ New Pickup</button>
-    <h3 class="section">My pickups <span class="muted small">(last 7 days)</span></h3>
-    <div id="mine" class="cards"><div class="muted">Loading…</div></div>`, { title: "My pickups" });
+    <div class="board">
+      <button class="btn primary huge" data-go="form">＋ New Pickup</button>
+      <div class="bpills" id="hPills">${HSTAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
+      <div class="bsearch"><input id="hQ" type="search" placeholder="Search file #, car, VIN, shop…"><button class="btn ghost sm" id="hRefresh" title="Refresh">↻</button></div>
+      <div id="mine" class="fgrid"><div class="muted">Loading…</div></div>
+    </div>`, { title: "My pickups" });
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
-  const local = (await outbox.all()).filter((i) => i.uid === S.user.id);
-  let rows = [];
-  if (navigator.onLine) {
-    const { data, error } = await sb.from("pickups").select("*").eq("driver_id", S.user.id).order("picked_up_at", { ascending: false }).limit(200);
-    if (!error) rows = data;
-  }
-  const el = $("#mine");
-  if (!el) return;
-  const pend = local.map((i) => ({ ...i.row, _local: true, invoice_path: i.invoice ? 1 : null, photo_paths: i.photos || [] }));
-  const all = [...pend, ...rows];
-  if (!all.length) { el.innerHTML = `<div class="empty">No pickups yet.${navigator.onLine ? "" : " (Offline — only pickups on this phone show.)"}</div>`; return; }
-  el.innerHTML = all.map(cardHtml).join("");
-  $$("[data-open]", el).forEach((c) => (c.onclick = () => go("detail", c.dataset.open)));
+  $("#hQ").value = hf.q;
+  let all = [];
+  const load = async () => {
+    const local = (await outbox.all()).filter((i) => i.uid === S.user.id);
+    let rows = [];
+    if (navigator.onLine) {
+      const { data, error } = await sb.from("pickups").select("*").eq("driver_id", S.user.id).order("picked_up_at", { ascending: false }).limit(200);
+      if (!error) rows = data;
+    }
+    const pend = local.map((i) => ({ ...i.row, _local: true, invoice_path: i.invoice ? 1 : null, photo_paths: i.photos || [] }));
+    all = [...pend, ...rows].map((p) => ({ ...p, stage: homeStage(p),
+      search: [p.file_number, p.year, p.make, p.model, p.color, p.vin, p.shop_name].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "") }));
+    draw();
+  };
+  const order = { photos: 0, finish: 1, sent: 2, done: 3 };
+  const draw = () => {
+    const el = $("#mine"); if (!el) return;
+    const words = normSearch(hf.q);
+    const match = (p) => !words.length || words.every((w) => p.search.includes(w));
+    const counts = {}; let active = 0;
+    for (const p of all) if (match(p)) { counts[p.stage] = (counts[p.stage] || 0) + 1; if (p.stage !== "done") active++; }
+    $$("#hPills [data-n]").forEach((b) => (b.textContent = b.dataset.n === "all" ? active : counts[b.dataset.n] || 0));
+    $$("#hPills .bpill").forEach((b) => b.classList.toggle("on", b.dataset.st === hf.stage));
+    const list = all.filter((p) => match(p) && (hf.stage === "all" ? (words.length || p.stage !== "done") : p.stage === hf.stage))
+      .sort((x, y) => (hf.stage === "all" ? order[x.stage] - order[y.stage] : 0) || String(y.picked_up_at || "").localeCompare(String(x.picked_up_at || "")));
+    el.innerHTML = list.length ? list.map(homeCard).join("")
+      : `<div class="empty">${hf.q ? "Nothing matches your search." : !all.length ? "No pickups yet." + (navigator.onLine ? "" : " (Offline — only pickups on this phone show.)") : "Nothing here 👍"}</div>`;
+    $$("[data-open]", el).forEach((c) => (c.onclick = () => go("detail", c.dataset.open)));
+  };
+  $("#hPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; hf.stage = b.dataset.st; draw(); };
+  let t; $("#hQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { hf.q = e.target.value.trim(); draw(); }, 200); };
+  $("#hRefresh").onclick = load;
+  await load();
 }
 
 function cardHtml(p) {
@@ -1662,7 +1718,7 @@ async function renderDrop() {
   $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); };
   let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
   $("#bRefresh").onclick = load;
-  if (own) wireSyncBar(load);
+  if (own) { wireSyncBar(load); fillDistancesHere(() => { if (S.view === "dash" && S.dashTab === "drop") load(); }); }
   await load();
 }
 /** one drop-off file: dates, payment, shop invoice */
@@ -1987,6 +2043,7 @@ async function renderBoard() {
   wireSyncBar(load);
   await load();
   autoSyncJobs().then((n) => { if (n && S.view === "dash" && S.dashTab === "board") load(); });
+  fillDistancesHere(() => { if (S.view === "dash" && S.dashTab === "board") load(); });
 }
 
 // ─────────────────────────────────────────────────────────────── Progi "to pick up" list
@@ -2184,6 +2241,40 @@ function openProgiSheet(fn) {
   })().catch((e) => { w?.close(); toast(e.message, "err"); });
 }
 const PIX_SHEET = "https://pix.app.progi.com/towing-ticket/token/";
+/** owner's browser fills distances the server could not (map services sometimes block servers) */
+const YARD_LL = [44.4541215, -79.1352936];
+let distBusy = false;
+async function fillDistancesHere(onDone) {
+  if (!isOwner() || distBusy || !navigator.onLine) return;
+  distBusy = true;
+  try {
+    const since = dayKey(new Date(Date.now() - 60 * 864e5));
+    const [a, b] = await Promise.all([
+      sb.from("progi_jobs").select("file_number, shop_address, shop_city, dist_addr").is("distance_km", null).not("shop_address", "is", null).or("status.eq.open,and(status.eq.picked,form_done.eq.false)").limit(80),
+      sb.from("dropoffs").select("file_number, pickup_address, pickup_city, dist_addr").is("distance_km", null).not("pickup_address", "is", null).gte("call_date", since).limit(80),
+    ]);
+    const todo = [...(a.data || []).map((r) => ["progi_jobs", r.file_number, [r.shop_address, r.shop_city], r.dist_addr]),
+      ...(b.data || []).map((r) => ["dropoffs", r.file_number, [r.pickup_address, r.pickup_city], r.dist_addr])]
+      .map(([t, fn, parts, was]) => ({ t, fn, key: parts.filter(Boolean).join(", "), was })).filter((x) => x.was !== x.key + "|x").slice(0, 40);
+    let n = 0;
+    for (const x of todo) {
+      let ll = null;
+      try {
+        const g = await (await fetch(`https://photon.komoot.io/api/?limit=1&lat=${YARD_LL[0]}&lon=${YARD_LL[1]}&q=${encodeURIComponent(x.key)}`)).json();
+        const c = g?.features?.[0]?.geometry?.coordinates; if (c) ll = [c[1], c[0]];
+      } catch { break; }
+      if (!ll) { await sb.from(x.t).update({ dist_addr: x.key + "|x" }).eq("file_number", x.fn); continue; }
+      try {
+        const r = await (await fetch(`https://router.project-osrm.org/route/v1/driving/${YARD_LL[1]},${YARD_LL[0]};${ll[1]},${ll[0]}?overview=false`)).json();
+        const m = r?.routes?.[0]?.distance; if (typeof m !== "number") continue;
+        await sb.from(x.t).update({ distance_km: Math.round(m / 100) / 10, dist_addr: x.key }).eq("file_number", x.fn);
+        n++;
+      } catch { break; }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (n && onDone) onDone();
+  } finally { distBusy = false; }
+}
 /** owner only: driving distance from the yard (filled by the server sync) */
 const kmChip = (km, from) => (isOwner() && km != null ? `<span class="schip st-km" title="${String(from || "").startsWith("~") ? "On hold: only the town is known" : "Driving distance from the yard"}">🚗 ${String(from || "").startsWith("~") ? "≈ " : ""}${Math.round(+km)} km</span>` : "");
 async function renderSheet(fn) {
