@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.21.2";
+const VERSION = "1.22.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1541,6 +1541,73 @@ async function renderDash() {
   dailyCleanup();
 }
 
+// ─────────────────────────────────────────────────────────────── server sync with Progi (Edge Function progi-sync)
+const SYNC_FN = SUPABASE_URL.replace(/\/$/, "") + "/functions/v1/progi-sync";
+const ago = (t) => { if (!t) return "never"; const m = Math.round((Date.now() - new Date(t)) / 60000); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : dayKey(t); };
+async function syncStatus() {
+  const [{ data: link }, { data: runs }] = await Promise.all([
+    sb.rpc("progi_link_status"),
+    sb.from("sync_runs").select("started_at, finished_at, ok, error, summary, trigger").not("finished_at", "is", null).order("id", { ascending: false }).limit(1),
+  ]);
+  return { link: (link || [])[0] || null, last: (runs || [])[0] || null };
+}
+function syncSummaryHtml(s) {
+  if (!s) return "";
+  const parts = [];
+  const list = (a) => a.slice(0, 6).map((f) => f.replace("MT-A", "")).join(", ") + (a.length > 6 ? ` +${a.length - 6}` : "");
+  if (s.newToPick?.length) parts.push(`🆕 <b>${s.newToPick.length}</b> new to pick up <span class="muted">(${list(s.newToPick)})</span>`);
+  if (s.nowPicked?.length) parts.push(`🚛 <b>${s.nowPicked.length}</b> picked up → In yard <span class="muted">(${list(s.nowPicked)})</span>`);
+  if (s.nowHold?.length) parts.push(`⏸ <b>${s.nowHold.length}</b> put on hold <span class="muted">(${list(s.nowHold)})</span>`);
+  if (s.submitted?.length) parts.push(`✅ <b>${s.submitted.length}</b> marked submitted <span class="muted">(${list(s.submitted)})</span>`);
+  if (s.gone?.length) parts.push(`🗑 <b>${s.gone.length}</b> cancelled / closed in Progi <span class="muted">(${list(s.gone)})</span>`);
+  return parts.length ? parts.map((p) => `<div>${p}</div>`).join("") : `<div class="muted">No changes — the app already matched Progi.</div>`;
+}
+async function wireSyncBar(onDone) {
+  const info = $("#syncInfo"), btn = $("#syncBtn");
+  const paint = async () => {
+    try {
+      const { link, last } = await syncStatus();
+      if (!link?.connected) { info.innerHTML = `<b class="warnt">Progi not connected.</b> <a href="#" id="linkSetup">Set it up (once)</a>`; }
+      else if (link.status === "error") { info.innerHTML = `<b class="warnt">Progi link expired.</b> <a href="#" id="linkSetup">Reconnect</a>`; }
+      else info.innerHTML = `Progi: updated <b>${esc(ago(last?.finished_at))}</b>${last && !last.ok ? ` · <span class="warnt">last try failed</span>` : ""} <span class="muted">· every 30 min</span> · <a href="#" id="linkSetup" class="muted">link</a>`;
+      const ls = $("#linkSetup"); if (ls) ls.onclick = (e) => { e.preventDefault(); renderProgiLink(); };
+    } catch { info.textContent = "Progi sync not set up yet."; }
+  };
+  btn.onclick = async () => {
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "Updating…";
+    $("#syncResult").innerHTML = `<div class="syncres muted">Reading Progi… (about 20 seconds)</div>`;
+    try {
+      const { data } = await sb.auth.getSession();
+      const r = await fetch(SYNC_FN, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + data.session.access_token }, body: JSON.stringify({ action: "sync", trigger: "button" }) });
+      const j = await r.json().catch(() => ({}));
+      if (j.busy) $("#syncResult").innerHTML = `<div class="syncres">${esc(j.message)}</div>`;
+      else if (!r.ok || j.error) $("#syncResult").innerHTML = `<div class="syncres bad">⚠️ ${esc(j.error || "Update failed (" + r.status + ")")}</div>`;
+      else { $("#syncResult").innerHTML = `<div class="syncres"><b>Updated from Progi</b>${syncSummaryHtml(j.summary)}</div>`; S.jobs = null; await onDone?.(); }
+    } catch (e) { $("#syncResult").innerHTML = `<div class="syncres bad">⚠️ ${esc(e.message)}</div>`; }
+    btn.disabled = false; btn.textContent = old; paint();
+  };
+  paint();
+}
+/** owner: one-time Progi link — a bookmark that hands Progi's sign-in to the server (the app never sees it) */
+async function renderProgiLink() {
+  shell(`<div id="pl" class="stack"><div class="muted">Loading…</div></div>`, { title: "Connect Progi", back: () => go("dash") });
+  const { data: code, error } = await sb.rpc("progi_connect_code");
+  if (error || !code) { $("#pl").innerHTML = `<div class="empty">Couldn't load the connect code: ${esc(error?.message || "owner only")}</div>`; return; }
+  const bm = `javascript:(async()=>{try{const k=Object.keys(localStorage).find(k=>k.startsWith('oidc.user:'));const s=Object.keys(localStorage).find(k=>k.startsWith('selectedScopeId_'));if(!k||!s){alert('Open pix.app.progi.com and sign in first, then press this bookmark.');return}const o=JSON.parse(localStorage.getItem(k));const r=await fetch('${SYNC_FN}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'connect',code:'${code}',refresh_token:o.refresh_token,scope_id:localStorage.getItem(s)})});const j=await r.json().catch(()=>({}));if(j.ok){localStorage.removeItem(k);alert('Connected \\u2713  Progi now updates the app by itself.\\n\\nThis browser was signed out of Progi so the two never clash - just sign in again whenever you need Progi here.');location.href='https://pix.app.progi.com/'}else{alert('Not connected: '+(j.error||r.status))}}catch(e){alert('Error: '+e.message)}})()`;
+  $("#pl").innerHTML = `
+    <section class="card stack">
+      <h3>Connect Progi to the app (one time)</h3>
+      <p class="muted small">After this, the app reads Progi every 30 minutes by itself — no computer needs to stay on. Your Progi password is never stored.</p>
+      <ol class="steps">
+        <li>On a <b>computer</b>, drag this button to Chrome's bookmarks bar:<br><a class="btn primary bmk" href="${esc(bm)}" onclick="alert('Drag me to the bookmarks bar, then open Progi and click me there.');return false;">⭐ Connect Progi</a></li>
+        <li>Open <b>pix.app.progi.com</b> and sign in as usual.</li>
+        <li>Click the <b>⭐ Connect Progi</b> bookmark. You'll see <b>“Connected ✓”</b>. Progi signs that browser out — just sign in again whenever you need it.</li>
+        <li>Come back here and press <b>🔄 Update from Progi</b> to check it works.</li>
+      </ol>
+      <p class="muted small">If the app ever says <b>“Progi link expired”</b>, repeat steps 2–3.</p>
+    </section>`;
+}
+
 // ─────────────────────────────────────────────────────────────── Files board (owner home)
 /** every file walks through these stages; the board shows one row of tappable stage chips with counts */
 const STAGES = [
@@ -1630,6 +1697,8 @@ async function renderBoard() {
   const bf = (S.board ||= { stage: "all", q: "", limit: 60 });
   shell(`${dashTabsHtml()}
     <div class="board">
+      <div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
+      <div id="syncResult"></div>
       <div class="bpills" id="bPills">${STAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
       <p class="muted small bhint" id="bHint"></p>
       <div class="bsearch"><input id="bQ" type="search" placeholder="Search file #, car, VIN, shop…"><button class="btn ghost sm" id="bRefresh" title="Refresh">↻</button></div>
@@ -1667,6 +1736,7 @@ async function renderBoard() {
   $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); b.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" }); };
   let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
   $("#bRefresh").onclick = load;
+  wireSyncBar(load);
   await load();
   autoSyncJobs().then((n) => { if (n && S.view === "dash" && S.dashTab === "board") load(); });
 }
