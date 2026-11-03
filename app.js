@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.25.0";
+const VERSION = "1.26.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1648,7 +1648,7 @@ async function renderDrop() {
     $("#bList").innerHTML = list.length ? shown.map(dropCard).join("") + (list.length > shown.length ? `<button class="btn ghost bmore" id="bMore">Show more (${list.length - shown.length})</button>` : "")
       : `<div class="empty">${bf.q ? "Nothing matches your search." : "Nothing here."}</div>`;
     $$("#bList [data-dopen]").forEach((b) => (b.onclick = () => go("drop", b.dataset.dopen)));
-    $$("#bList [data-dsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = "dash"; go("sheet", b.dataset.dsheet); }));
+    $$("#bList [data-dsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = own ? "dash" : "drops"; go("sheet", b.dataset.dsheet); }));
     $$("#bList [data-dqb]").forEach((b) => (b.onclick = async () => {
       const { error } = await sb.from("dropoffs").update({ qb_status: "done", updated_at: new Date().toISOString() }).eq("id", b.dataset.dqb);
       if (error) return toast(error.message, "err");
@@ -1921,6 +1921,7 @@ function fileCard(f) {
       : ready ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><button class="btn primary sm" data-fsend="${a.id}">📤 Send to Progi</button>`
       : `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>`;
   }
+  if (f.stage !== "topick" && j?.ticket_token) acts = `<button class="btn ghost sm" data-fsheet="${esc(f.fn)}">📄 Sheet</button>` + acts;
   return `<article class="fcard ${st.cls}">
     <div class="fhead"><b class="mono">${esc(f.fn)}</b><span class="fveh">${esc(f.veh || "—")}${a?.color ? ` <span class="muted">· ${esc(a.color)}</span>` : ""}</span></div>
     <div class="fchips">${chips.join("")}</div>
@@ -2168,7 +2169,8 @@ async function renderJobs(target) {
 
 /** pickup sheet from Progi's towing ticket — everything except the notes (fee approvals etc. stay in the office) */
 async function renderSheet(fn) {
-  const back = () => go(S.sheetBack || "jobs");
+  const back = () => S.sheetBack === "detail" ? go("detail", S.sheetBackArg) : go(S.sheetBack || "jobs");
+  const own = isOwner();
   shell(`<div id="sheet" class="sheet"><div class="muted">Loading pickup sheet…</div></div>`, { title: "Pickup sheet " + fn, back });
   const el = $("#sheet");
   try {
@@ -2187,10 +2189,25 @@ async function renderSheet(fn) {
     const row = (k, val) => (val ? `<tr><th>${k}</th><td>${val}</td></tr>` : "");
     const m2 = (n) => (n == null || n === "" ? "—" : money(+n));
     const pf = f.projectedFees || [];
+    const ins = t.insurance || {};
+    const instr = [t.pickup?.pickupInstructions?.notes, t.pickup?.pickupInstructions?.specialInstructions, t.specialInstructions].filter((x) => typeof x === "string" && x.trim()).join("\n");
+    // everything else Progi puts on the sheet (owner only): insured, adjuster, policy, date of loss…
+    const lbl = (k) => k.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+    const insRows = [];
+    const walk = (o, pre) => Object.entries(o || {}).forEach(([k, v]) => {
+      if (v && typeof v === "object" && !Array.isArray(v)) return walk(v, k);
+      if (v === null || v === "" || Array.isArray(v) || (/id$/i.test(k) && !/claim|policy/i.test(k))) return;
+      const val = typeof v === "boolean" ? (v ? "Yes" : "No") : /date/i.test(k) ? String(v).slice(0, 10) : String(v);
+      insRows.push([lbl(pre && /^(name|number|firstName|lastName|email)$/i.test(k) ? pre + " " + k : k), val]);
+    });
+    walk(ins, "");
+    const D = t.delivery?.deliveryLocation || {}, DA = D.address || {};
+    const dAddr = [D.name, DA.addressLine1, DA.city, DA.state].filter(Boolean).join(", ");
     el.innerHTML = `
       <div class="sheet-head"><div><h2 class="mono">${esc(pixToFile(t.pixNumber || fn))}</h2>
         <div class="muted small">Progi pickup sheet · printed ${esc(dayKey(new Date()))}</div></div>
-        <div class="btnrow noprint"><button class="btn sm" id="sheetPrint">🖨 Print / PDF</button></div></div>
+        <div class="btnrow noprint"><button class="btn sm" id="sheetPrint">🖨 Print / PDF</button>${own ? `<a class="btn ghost sm" target="_blank" rel="noopener" href="https://pix.app.progi.com/towing-ticket/token/${encodeURIComponent(j.ticket_token)}?locale=en">Original Progi sheet ↗</a>` : ""}</div></div>
+      ${own && instr ? `<section class="card sheet-note"><h3>Special instructions <small class="muted">(only you see this)</small></h3><p>${esc(instr).replace(/\n/g, "<br>")}</p></section>` : ""}
       <section class="card"><h3>Vehicle</h3><table class="skv">
         ${row("Vehicle", esc([v.year, v.make, v.model].filter(Boolean).join(" ")))}
         ${row("VIN", `<span class="mono">${esc(v.identificationNumber?.number || "")}</span>`)}
@@ -2209,8 +2226,10 @@ async function renderSheet(fn) {
       ${pf.length ? `<table class="tbl small"><thead><tr><th>If picked up on</th><th>Towing</th><th>Storage</th><th>Other</th><th>Before tax</th><th>Total</th></tr></thead><tbody>
         ${pf.map((p) => `<tr><td class="nowrap">${esc(String(p.date || "").slice(0, 10))}</td><td>${m2(p.totalTowing)}</td><td class="small">${esc(String(p.totalStorage ?? ""))}</td><td>${m2(p.totalOther)}</td><td>${m2(p.beforeTaxes)}</td><td><b>${m2(p.total)}</b></td></tr>`).join("")}
       </tbody></table>` : ""}</section>
+      ${dAddr ? `<section class="card"><h3>Deliver to</h3><table class="skv">${row("Place", esc(dAddr))}</table></section>` : ""}
       <section class="card"><h3>Insurance</h3><table class="skv">
-        ${row("Insurer", esc(t.insurance?.insurer?.insurerName || ""))}${row("Claim #", esc(t.insurance?.claim?.claimNumber || ""))}
+        ${own ? insRows.map(([k, v]) => row(esc(k), esc(v))).join("") || row("Insurer", "—")
+          : row("Insurer", esc(ins.insurer?.insurerName || "")) + row("Claim #", esc(ins.claim?.claimNumber || ""))}
       </table></section>`;
     $("#sheetPrint").onclick = () => window.print();
   } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
@@ -2499,7 +2518,7 @@ async function renderDetail(id) {
 
   shell(`
     <section class="card head">
-      <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
+      <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}<button class="btn ghost sm" id="detSheet">📄 Pickup sheet</button>${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
       <div>${esc(veh)} · ${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))} ${p.burned ? `<span class="pill red">Burned</span>` : ""}</div>
       ${p.vin ? `<div class="mono small">VIN ${esc(p.vin)}</div>` : ""}
       <div class="muted small">Picked up ${whenLabel(p.picked_up_at || p.recorded_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
@@ -2550,6 +2569,7 @@ async function renderDetail(id) {
   `, { title: p.file_number, back: () => go(isOwner() ? "dash" : "home") });
 
   loadThumbs($(".main"));
+  $("#detSheet").onclick = () => { S.sheetBack = "detail"; S.sheetBackArg = p.id; go("sheet", p.file_number); };
   if (p.invoice_path) {
     $("#openPdf").onclick = async () => { const w = window.open("", "_blank"); try { const u = await signedUrl(p.invoice_path); if (w) w.location = u; else location.href = u; } catch (e) { w?.close(); toast(e.message, "err"); } };
     $("#dlPdf").onclick = async () => { try { location.href = await signedUrl(p.invoice_path, `${p.file_number}.pdf`); } catch (e) { toast(e.message, "err"); } };
