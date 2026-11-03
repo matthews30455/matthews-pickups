@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.22.0";
+const VERSION = "1.23.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -599,6 +599,7 @@ const progiPill = (p) => p.progi_status === "submitted" ? `<span class="pill gre
  */
 function renderForm(existing, opts = {}) {
   const edit = !!existing;
+  const canSend = edit && !["queued", "submitted"].includes(existing.progi_status);
   const f = {
     file_number: existing?.file_number || "",
     driver_id: existing?.driver_id || "",
@@ -770,8 +771,8 @@ function renderForm(existing, opts = {}) {
     <label class="field"><span>Notes</span><textarea name="notes" rows="2" placeholder="Anything the office should know">${esc(f.notes)}</textarea></label>
 
     <p class="err-text" id="formErr"></p>
-    <div class="savebar"><button class="btn primary big" type="submit" id="saveBtn">${edit ? "Save changes" : "Save Pickup"}</button>
-      <button class="btn ghost" type="button" id="draftBtn">💾 Save draft — finish later</button></div>
+    <div class="savebar">${canSend ? `<button class="btn primary big" type="button" id="sendBtn">📤 Save &amp; send to Progi</button>` : ""}<button class="btn ${canSend ? "" : "primary big"}" type="submit" id="saveBtn">${edit ? (canSend ? "💾 Save only" : "Save changes") : "Save Pickup"}</button>
+      ${!edit || existing.draft ? `<button class="btn ghost" type="button" id="draftBtn">💾 Save draft — finish later</button>` : ""}</div>
   </form>`;
 
   if (target) target.innerHTML = html;
@@ -1090,11 +1091,14 @@ function renderForm(existing, opts = {}) {
   renderPhotos();
 
   // save (a draft only needs the file number; the rest can be finished later)
-  let asDraft = false;
-  $("#draftBtn").onclick = () => { asDraft = true; form.requestSubmit ? form.requestSubmit() : form.onsubmit(new Event("submit")); };
+  let asDraft = false, sendAfter = false;
+  const sb2 = $("#sendBtn");
+  if (sb2) sb2.onclick = () => { sendAfter = true; form.requestSubmit ? form.requestSubmit() : form.onsubmit(new Event("submit")); };
+  if ($("#draftBtn")) $("#draftBtn").onclick = () => { asDraft = true; form.requestSubmit ? form.requestSubmit() : form.onsubmit(new Event("submit")); };
   form.onsubmit = async (e) => {
     e.preventDefault();
     const draft = asDraft; asDraft = false;
+    const send = sendAfter && !draft; sendAfter = false;
     if (draft) {
       if (!f.vehicle_type) f.vehicle_type = typeFromModel(f.model) || "Car";
       if (!f.make.trim() || !f.model.trim()) { $("#formErr").textContent = "A draft needs at least make and model"; return; }
@@ -1135,7 +1139,11 @@ function renderForm(existing, opts = {}) {
       return;
     }
     $("#formErr").textContent = "";
-    const btn = $("#saveBtn"); btn.disabled = true; btn.textContent = "Saving…";
+    if (send) {
+      const nPh = (existing.photo_paths || []).filter((p) => !removePhotos.has(p)).length + photos.length;
+      if (nPh < PROGI_MIN_PHOTOS && !confirm(`Only ${nPh} photos (Progi needs ${PROGI_MIN_PHOTOS}). Send anyway?`)) return;
+    }
+    const btn = send ? $("#sendBtn") : $("#saveBtn"); btn.disabled = true; btn.textContent = send ? "Sending…" : "Saving…";
 
     const row = {
       file_number: f.file_number.trim().toUpperCase(),
@@ -1171,6 +1179,7 @@ function renderForm(existing, opts = {}) {
       extras: f.extras,
       notes: f.notes.trim() || null,
       draft,
+      ...(send ? { progi_status: "queued" } : {}),
       ...(isOwner() && f.driver_id ? { driver_id: f.driver_id } : {}),
     };
     if (draft && row.paid && !(row.amount > 0 && row.payment_type)) {   // payment not filled yet
@@ -1219,11 +1228,11 @@ function renderForm(existing, opts = {}) {
       if (error) throw error;
       if (!data?.length) throw new Error(isOwner() ? "Not saved" : "Can only edit today's pickups");
       if (removePhotos.size && isOwner()) await sb.storage.from(BUCKET).remove([...removePhotos]);
-      toast("Saved ✓", "ok");
+      toast(send ? "Saved ✓ — sent to the Progi queue" : "Saved ✓", "ok");
       opts.onSaved ? opts.onSaved() : go(isOwner() ? "dash" : "home");
     } catch (err) {
       $("#formErr").textContent = err.message || "Could not save";
-      btn.disabled = false; btn.textContent = edit ? "Save changes" : "Save Pickup";
+      btn.disabled = false; btn.textContent = send ? "📤 Save & send to Progi" : edit ? (canSend ? "💾 Save only" : "Save changes") : "Save Pickup";
     }
   };
 }
@@ -1569,7 +1578,7 @@ async function wireSyncBar(onDone) {
       const { link, last } = await syncStatus();
       if (!link?.connected) { info.innerHTML = `<b class="warnt">Progi not connected.</b> <a href="#" id="linkSetup">Set it up (once)</a>`; }
       else if (link.status === "error") { info.innerHTML = `<b class="warnt">Progi link expired.</b> <a href="#" id="linkSetup">Reconnect</a>`; }
-      else info.innerHTML = `Progi: updated <b>${esc(ago(last?.finished_at))}</b>${last && !last.ok ? ` · <span class="warnt">last try failed</span>` : ""} <span class="muted">· every 30 min</span> · <a href="#" id="linkSetup" class="muted">link</a>`;
+      else info.innerHTML = `Progi: updated <b>${esc(ago(last?.finished_at))}</b>${last && !last.ok ? ` · <span class="warnt">last try failed</span>` : ""} <span class="muted">· every 10 min</span> · <a href="#" id="linkSetup" class="muted">link</a>`;
       const ls = $("#linkSetup"); if (ls) ls.onclick = (e) => { e.preventDefault(); renderProgiLink(); };
     } catch { info.textContent = "Progi sync not set up yet."; }
   };
@@ -1597,7 +1606,7 @@ async function renderProgiLink() {
   $("#pl").innerHTML = `
     <section class="card stack">
       <h3>Connect Progi to the app (one time)</h3>
-      <p class="muted small">After this, the app reads Progi every 30 minutes by itself — no computer needs to stay on. Your Progi password is never stored.</p>
+      <p class="muted small">After this, the app reads Progi every 10 minutes by itself — no computer needs to stay on. Your Progi password is never stored.</p>
       <ol class="steps">
         <li>On a <b>computer</b>, drag this button to Chrome's bookmarks bar:<br><a class="btn primary bmk" href="${esc(bm)}" onclick="alert('Drag me to the bookmarks bar, then open Progi and click me there.');return false;">⭐ Connect Progi</a></li>
         <li>Open <b>pix.app.progi.com</b> and sign in as usual.</li>
@@ -1634,7 +1643,7 @@ function fileMissing(f) {
   if (n < PROGI_MIN_PHOTOS) m.push(`${n}/${PROGI_MIN_PHOTOS} photos`);
   if (a.paid && !a.invoice_path) m.push("invoice");
   if (a.paid && !a.amount) m.push("amount");
-  if (a.draft) m.push("draft");
+  if (a.draft) m.push("details (draft)");
   return m;
 }
 async function loadFiles() {
@@ -1684,7 +1693,10 @@ function fileCard(f) {
       ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
       ${f.stage === "done" && f.done ? `<div class="fline muted">Submitted ${esc(f.done)}</div>` : ""}
       ${a?.driver_id ? `<div class="fline muted">👤 ${esc(driverName(a.driver_id))}</div>` : ""}`;
-    acts = a ? `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>` : `<span class="muted small">Done directly in Progi</span>`;
+    const ready = f.stage === "finish" && !miss.length;
+    acts = !a ? `<span class="muted small">Done directly in Progi</span>`
+      : ready ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><button class="btn primary sm" data-fsend="${a.id}">📤 Send to Progi</button>`
+      : `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>`;
   }
   return `<article class="fcard ${st.cls}">
     <div class="fhead"><b class="mono">${esc(f.fn)}</b><span class="fveh">${esc(f.veh || "—")}${a?.color ? ` <span class="muted">· ${esc(a.color)}</span>` : ""}</span></div>
@@ -1729,6 +1741,13 @@ async function renderBoard() {
     $("#bList").innerHTML = rows.length ? shown.map(fileCard).join("") + (rows.length > shown.length ? `<button class="btn ghost bmore" id="bMore">Show ${Math.min(60, rows.length - shown.length)} more of ${rows.length - shown.length}</button>` : "")
       : `<div class="empty">${bf.q ? "Nothing matches your search." : bf.stage === "photos" ? "Every picked-up car has photos 👍" : bf.stage === "queue" ? "The Progi queue is empty." : "Nothing here."}</div>`;
     $$("#bList [data-fopen]").forEach((b) => (b.onclick = () => go("detail", b.dataset.fopen)));
+    $$("#bList [data-fsend]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true; b.textContent = "Sending…";
+      const { error } = await sb.from("pickups").update({ progi_status: "queued" }).eq("id", b.dataset.fsend);
+      if (error) { toast(error.message, "err"); b.disabled = false; b.textContent = "📤 Send to Progi"; return; }
+      const f = files.find((x) => x.app?.id === b.dataset.fsend); if (f) { f.app.progi_status = "queued"; f.stage = "queue"; }
+      toast("Sent to the Progi queue ✓", "ok"); draw();
+    }));
     $$("#bList [data-fstart]").forEach((b) => (b.onclick = () => go("form", b.dataset.fstart)));
     $$("#bList [data-fsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = "dash"; go("sheet", b.dataset.fsheet); }));
     const more = $("#bMore"); if (more) more.onclick = () => { bf.limit += 60; draw(); };
