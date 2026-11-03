@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.29.0";
+const VERSION = "1.30.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1897,8 +1897,9 @@ function fileCard(f) {
   const today = dayKey(new Date());
   const late = f.stage === "topick" && j?.status === "open" && j.due_date && j.due_date < today;
   const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`];
-  if (j?.distance_km != null) chips.push(kmChip(j.distance_km, j.dist_addr));
-  if (j?.status === "hold" && f.stage === "topick") chips.push(`<span class="schip st-grey">On hold</span>`);
+  const onHold = j?.status === "hold" && f.stage === "topick";
+  if (j?.distance_km != null && !onHold) chips.push(kmChip(j.distance_km, j.dist_addr));
+  if (onHold) chips.push(`<span class="schip st-hold">⏸ On hold</span>`);
   if (j?.pix_status === "atAuction" && f.stage !== "done") chips.push(`<span class="schip st-grey">At auction</span>`);
   if (j?.pix_status === "sold" && f.stage !== "done") chips.push(`<span class="schip st-grey">Sold</span>`);
   if (late) chips.push(`<span class="schip st-red">Late · due ${esc(j.due_date)}</span>`);
@@ -1925,7 +1926,7 @@ function fileCard(f) {
       : `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>`;
   }
   if (f.stage !== "topick" && j?.ticket_token) acts = `<button class="btn ghost sm" data-fsheet="${esc(f.fn)}">📄 Sheet</button>` + acts;
-  return `<article class="fcard ${st.cls}">
+  return `<article class="fcard ${onHold ? "st-hold is-hold" : st.cls}">
     <div class="fhead"><b class="mono">${esc(f.fn)}</b><span class="fveh">${esc(f.veh || "—")}${a?.color ? ` <span class="muted">· ${esc(a.color)}</span>` : ""}</span></div>
     <div class="fchips">${chips.join("")}</div>
     ${info}
@@ -1963,7 +1964,8 @@ async function renderBoard() {
     // searching under "All files" also finds finished files
     let rows = files.filter((f) => match(f) && (bf.stage === "all" ? (words.length || f.stage !== "done") : f.stage === bf.stage));
     const by = (f) => f.stage === "topick" ? (f.job?.status === "hold" ? "9" : "") + (f.job?.due_date || "9999") : f.stage === "done" ? "" : (f.picked || "9999");
-    rows.sort((x, y) => bf.stage === "all" ? (order[x.stage] - order[y.stage]) || by(x).localeCompare(by(y)) : bf.stage === "done" ? (y.done || y.picked || "").localeCompare(x.done || x.picked || "") : by(x).localeCompare(by(y)));
+    const ord = (f) => (f.stage === "topick" && f.job?.status === "hold" ? 9 : order[f.stage]);
+    rows.sort((x, y) => bf.stage === "all" ? (ord(x) - ord(y)) || by(x).localeCompare(by(y)) : bf.stage === "done" ? (y.done || y.picked || "").localeCompare(x.done || x.picked || "") : by(x).localeCompare(by(y)));
     const shown = rows.slice(0, bf.limit);
     $("#bList").innerHTML = rows.length ? shown.map(fileCard).join("") + (rows.length > shown.length ? `<button class="btn ghost bmore" id="bMore">Show ${Math.min(60, rows.length - shown.length)} more of ${rows.length - shown.length}</button>` : "")
       : `<div class="empty">${bf.q ? "Nothing matches your search." : bf.stage === "photos" ? "Every picked-up car has photos 👍" : bf.stage === "queue" ? "The Progi queue is empty." : "Nothing here."}</div>`;
@@ -2112,7 +2114,7 @@ function jobCard(j, { compact = false } = {}) {
   const veh = [j.year, j.make, j.model].filter(Boolean).join(" ");
   const drv = (S.drivers || []).filter((d) => d.active);
   return `<div class="job ${late ? "late" : ""} ${j.status === "hold" ? "hold" : ""}" data-job="${esc(j.file_number)}">
-    <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>${kmChip(j.distance_km, j.dist_addr)}
+    <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>${j.status === "hold" ? "" : kmChip(j.distance_km, j.dist_addr)}
       ${j.status === "picked" ? `<span class="pill green">Picked up ${esc(j.picked_date || "")}</span>` : j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
     <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
     ${j.est_total == null ? "" : +j.est_total > 0 ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : `<div class="small muted">Nothing to pay (per Progi)</div>`}
