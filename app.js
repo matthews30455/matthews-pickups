@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.21.0";
+const VERSION = "1.21.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1941,7 +1941,10 @@ async function loadStats() {
   $$("#alerts [data-open]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); go("detail", a.dataset.open); }));
 }
 
-const normSearch = (t) => String(t || "").toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean).slice(0, 6);
+// "MT-A6455", "MTA 6455", "mt 6455", "A-6455", "6455" … all mean file 6455: keep just the number
+const normSearch = (t) => String(t || "").toLowerCase()
+  .replace(/(^|[^a-z0-9])(?:m\s*-?\s*t?|t)?\s*-?\s*a?\s*-?\s*(\d{4,5})(?![0-9])/g, "$1 $2 ")
+  .split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean).slice(0, 6);
 
 function sortTh(key, label, cls = "") {
   const fl = S.filters, on = fl.sort === key;
