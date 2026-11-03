@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.27.0";
+const VERSION = "1.28.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1589,7 +1589,7 @@ function dropMissing(d) {
 function dropCard(d) {
   const st = DSTAGE[d.stage];
   const veh = [d.year, d.make, d.model].filter(Boolean).join(" ");
-  const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`, `<span class="schip st-soft">→ ${esc(RECYCLER(d.recycler))}</span>`];
+  const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`, `<span class="schip st-soft">→ ${esc(RECYCLER(d.recycler))}</span>`, kmChip(d.distance_km)];
   if (d.stage === "send" && d.app_status === "queued") chips.push(`<span class="schip st-purple">📤 In queue</span>`);
   const today = dayKey(new Date());
   if (d.stage === "topick" && d.due_date) chips.push(`<span class="schip ${d.due_date < today ? "st-red" : "st-soft"}">${d.due_date < today ? "Late · " : ""}Due ${esc(d.due_date)}</span>`);
@@ -1677,7 +1677,7 @@ async function renderDropForm(id) {
   let pages = [], pdfFile = null;
   shell(`<form class="card stack" id="dForm" novalidate>
       <div><b class="mono big">${esc(d.file_number)}</b> <span class="muted">${esc(veh)}</span>
-        <div class="muted small">${esc(d.pickup_name || "")}${d.pickup_city ? " · " + esc(d.pickup_city) : ""} → ${esc(RECYCLER(d.recycler))}${d.vin ? ` · <span class="mono">${esc(d.vin)}</span>` : ""}</div></div>
+        <div class="muted small">${kmChip(d.distance_km)} ${esc(d.pickup_name || "")}${d.pickup_city ? " · " + esc(d.pickup_city) : ""} → ${esc(RECYCLER(d.recycler))}${d.vin ? ` · <span class="mono">${esc(d.vin)}</span>` : ""}</div></div>
       <div class="row2">
         <label class="field"><span>Pickup date *</span><input type="date" name="picked_up_on" value="${esc(f.picked_up_on)}"></label>
         <label class="field"><span>Drop-off date *</span><input type="date" name="dropped_off_on" value="${esc(f.dropped_off_on)}"></label>
@@ -1873,7 +1873,7 @@ function fileMissing(f) {
 }
 async function loadFiles() {
   const [jr, ar] = await Promise.all([
-    sb.from("progi_jobs").select("file_number, status, pix_status, form_done, picked_date, year, make, model, vin, shop_name, shop_address, shop_city, shop_phone, due_date, est_total, ticket_token, assigned_driver").in("status", ["open", "hold", "picked"]).limit(3000),
+    sb.from("progi_jobs").select("file_number, status, pix_status, form_done, picked_date, year, make, model, vin, shop_name, shop_address, shop_city, shop_phone, due_date, est_total, ticket_token, assigned_driver, distance_km").in("status", ["open", "hold", "picked"]).limit(3000),
     sb.from("pickups").select("id, file_number, year, make, model, vin, color, photo_paths, invoice_path, draft, paid, amount, payment_type, progi_status, progi_submitted_at, picked_up_at, recorded_at, driver_id, shop_name").order("recorded_at", { ascending: false }).limit(3000),
   ]);
   if (jr.error) throw jr.error;
@@ -1897,6 +1897,7 @@ function fileCard(f) {
   const today = dayKey(new Date());
   const late = f.stage === "topick" && j?.status === "open" && j.due_date && j.due_date < today;
   const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`];
+  if (j?.distance_km != null) chips.push(kmChip(j.distance_km));
   if (j?.status === "hold" && f.stage === "topick") chips.push(`<span class="schip st-grey">On hold</span>`);
   if (j?.pix_status === "atAuction" && f.stage !== "done") chips.push(`<span class="schip st-grey">At auction</span>`);
   if (j?.pix_status === "sold" && f.stage !== "done") chips.push(`<span class="schip st-grey">Sold</span>`);
@@ -2111,7 +2112,7 @@ function jobCard(j, { compact = false } = {}) {
   const veh = [j.year, j.make, j.model].filter(Boolean).join(" ");
   const drv = (S.drivers || []).filter((d) => d.active);
   return `<div class="job ${late ? "late" : ""} ${j.status === "hold" ? "hold" : ""}" data-job="${esc(j.file_number)}">
-    <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>
+    <div class="job-top"><b class="mono">${esc(j.file_number)}</b><span class="job-veh">${esc(veh)}</span>${kmChip(j.distance_km)}
       ${j.status === "picked" ? `<span class="pill green">Picked up ${esc(j.picked_date || "")}</span>` : j.status === "hold" ? `<span class="pill">On hold</span>` : j.due_date ? `<span class="pill ${late ? "red" : "amber"}">${late ? "Late · due " : "Due "}${esc(j.due_date)}</span>` : ""}</div>
     <div class="job-shop">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}${j.shop_phone ? ` · <a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a>` : ""}</div>
     ${j.est_total == null ? "" : +j.est_total > 0 ? `<div class="small">Pay ≈ <b>${money(j.est_total)}</b>${j.est_date ? ` on ${esc(j.est_date)}` : ""}${+j.daily_storage ? ` · storage ${money(j.daily_storage)}/day after that` : ""}</div>` : `<div class="small muted">Nothing to pay (per Progi)</div>`}
@@ -2181,6 +2182,8 @@ function openProgiSheet(fn) {
   })().catch((e) => { w?.close(); toast(e.message, "err"); });
 }
 const PIX_SHEET = "https://pix.app.progi.com/towing-ticket/token/";
+/** owner only: driving distance from the yard (filled by the server sync) */
+const kmChip = (km) => (isOwner() && km != null ? `<span class="schip st-km">🚗 ${Math.round(+km)} km</span>` : "");
 async function renderSheet(fn) {
   const back = () => S.sheetBack === "detail" ? go("detail", S.sheetBackArg) : go(S.sheetBack || "jobs");
   const own = isOwner();
@@ -2526,12 +2529,13 @@ async function renderDetail(id) {
   const { data: p, error } = await sb.from("pickups").select("*").eq("id", id).maybeSingle();
   if (error || !p) { $(".main").innerHTML = `<div class="empty">Not found${error ? ": " + esc(error.message) : ""}.</div>`; return; }
   if (isOwner() && !S.drivers.length) await loadDrivers();
+  const dist = isOwner() ? (await sb.from("progi_jobs").select("distance_km").eq("file_number", p.file_number).maybeSingle()).data?.distance_km : null;
   const canEdit = isOwner() || (p.driver_id === S.user.id && (isToday(p.recorded_at) || p.progi_status !== "submitted"));
   const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
 
   shell(`
     <section class="card head">
-      <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}<button class="btn ghost sm" id="detSheet">📄 Pickup sheet</button>${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
+      <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}${kmChip(dist)}<button class="btn ghost sm" id="detSheet">📄 Pickup sheet</button>${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
       <div>${esc(veh)} · ${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))} ${p.burned ? `<span class="pill red">Burned</span>` : ""}</div>
       ${p.vin ? `<div class="mono small">VIN ${esc(p.vin)}</div>` : ""}
       <div class="muted small">Picked up ${whenLabel(p.picked_up_at || p.recorded_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>

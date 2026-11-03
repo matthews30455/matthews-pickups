@@ -463,3 +463,4 @@ body { background: var(--bg); }
 @media (max-width: 520px) { .syncbar { flex-direction: column; align-items: stretch; } .syncbar .btn { width: 100%; } }
 .savebar #sendBtn + #saveBtn { margin-top: 6px; box-shadow: none; }
 .fcard .facts { gap: 8px; }
+.st-km { --c: #1d4f91; --cs: #e8f1fd; }
