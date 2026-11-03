@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.32.0";
+const VERSION = "1.33.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -444,9 +444,11 @@ async function logout() {
 // ─────────────────────────────────────────────────────────────── shell
 const NAV_ICON = (() => {
   const svg = (d) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  const dashIcon = '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>';
   return {
+    home: svg(dashIcon),
     dash: svg('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
-    home: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>'),
+    home_old: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>'),
     jobs: svg('<path d="M3 16V7a1 1 0 0 1 1-1h10v10"/><path d="M14 9h4l3 4v3h-7"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>'),
     yard: svg('<rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/><path d="M8 7l1.5-3h5L16 7"/>'),
     form: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
@@ -457,7 +459,7 @@ const NAV_ICON = (() => {
 function shell(inner, { title = "", back = null } = {}) {
   const tabs = isOwner()
     ? [["dash", "Dashboard"], ["jobs", "To pick up"], ["form", "New pickup"], ["drivers", "Drivers"]]
-    : [["home", "My pickups"], ["jobs", "To pick up"], ["yard", "In yard"], ["drops", "Drop-off"], ["form", "New pickup"]];
+    : [["home", "Files"], ["jobs", "To pick up"], ["drops", "Drop-off"], ["form", "New pickup"]];
   $("#app").innerHTML = `
     <header class="top">
       ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : ""}<img class="toplogo" src="logo.png" alt="Matthews">
@@ -485,7 +487,7 @@ function go(view, arg) {
   S.view = view;
   document.body.dataset.view = view;
   window.scrollTo(0, 0);
-  if (view === "home") return renderHome();
+  if (view === "home") return renderBoard();          // drivers get the same board as the office
   if (view === "form") { const run = () => renderForm(null, arg ? { job: arg } : {}); return isOwner() && !S.drivers.length ? loadDrivers().then(run) : run(); }
   if (view === "jobs") return renderJobs();
   if (view === "yard") { shell(`<div id="pickedWrap"></div>`, { title: "Cars in the yard" }); return renderPickedTab($("#pickedWrap")); }
@@ -535,7 +537,7 @@ async function syncOutbox(manual = false) {
   await renderOutboxBar();
   if (sent) {
     toast(`${sent} pickup${sent > 1 ? "s" : ""} sent ✓`, "ok");
-    if (S.view === "home") renderHome();
+    if (S.view === "home") renderBoard();
     if (S.view === "dash") loadDash();
   }
 }
@@ -1935,11 +1937,21 @@ async function loadFiles() {
   if (jr.error) throw jr.error;
   if (ar.error) throw ar.error;
   const map = new Map();
-  for (const j of jr.data || []) map.set(j.file_number, { fn: j.file_number, job: j, app: null });
+  for (const j of jr.data || []) {
+    if (!isOwner() && j.assigned_driver && j.assigned_driver !== S.user.id && ["open", "hold"].includes(j.status)) continue;
+    map.set(j.file_number, { fn: j.file_number, job: j, app: null });
+  }
   for (const a of ar.data || []) { const f = map.get(a.file_number) || { fn: a.file_number, job: null, app: null }; if (!f.app) f.app = a; map.set(a.file_number, f); }
+  if (!isOwner()) {     // cars another driver already photographed (their file is not visible to this driver)
+    const { data: ys } = await sb.rpc("yard_status");
+    for (const y of ys || []) {
+      const f = map.get(y.file_number);
+      if (f && !f.app) f.app = { id: null, _other: true, file_number: y.file_number, photo_paths: Array(y.photo_n).fill(""), progi_status: y.progi_status, draft: y.draft, paid: false };
+    }
+  }
   const files = [...map.values()];
   for (const f of files) {
-    const s = f.app || f.job;
+    const s = f.app?._other ? f.job : f.app || f.job;
     f.stage = fileStage(f);
     f.veh = [s.year || f.job?.year, s.make || f.job?.make, s.model || f.job?.model].filter(Boolean).join(" ");
     f.picked = f.job?.picked_date || (f.app ? dayKey(f.app.picked_up_at || f.app.recorded_at) : "");
@@ -1968,16 +1980,18 @@ function fileCard(f) {
     acts = `${j.ticket_token ? `<button class="btn ghost sm" data-fsheet="${esc(f.fn)}">📄 Pickup sheet</button>` : ""}${j.status === "open" ? `<button class="btn primary sm" data-fstart="${esc(f.fn)}">Start pickup →</button>` : ""}`;
   } else if (f.stage === "photos") {
     info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b>${(a?.vin || j?.vin) ? ` · <span class="mono small">${esc(a?.vin || j?.vin)}</span>` : ""}</div>`;
-    acts = a ? `<button class="btn primary sm" data-fopen="${a.id}">📷 Add photos →</button>` : `<button class="btn primary sm" data-fstart="${esc(f.fn)}">📷 Take photos →</button>`;
+    acts = a?._other ? `<span class="muted small">Started by another driver</span>`
+      : a ? `<button class="btn primary sm" data-fopen="${a.id}">📷 Add photos →</button>` : `<button class="btn primary sm" data-fstart="${esc(f.fn)}">📷 Take photos →</button>`;
   } else {
-    const miss = f.stage === "finish" ? fileMissing(f) : [];
+    const miss = f.stage === "finish" && !a?._other ? fileMissing(f) : [];
     const n = (a?.photo_paths || []).length;
     info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b> · 📷 ${n}${a?.invoice_path ? " · 🧾 invoice" : ""}${a?.paid ? ` · <b>${money(a.amount)}</b> ${esc(PAY_LABEL[a.payment_type] || "")}` : a ? " · no payment" : ""}</div>
       ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
       ${f.stage === "done" && f.done ? `<div class="fline muted">Submitted ${esc(f.done)}</div>` : ""}
       ${a?.driver_id ? `<div class="fline muted">👤 ${esc(driverName(a.driver_id))}</div>` : ""}`;
     const ready = f.stage === "finish" && !miss.length;
-    acts = !a ? `<span class="muted small">Done directly in Progi</span>`
+    acts = a?._other ? `<span class="muted small">Photos taken by another driver</span>`
+      : !a ? `<span class="muted small">Done directly in Progi</span>`
       : ready ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><button class="btn primary sm" data-fsend="${a.id}">📤 Send to Progi</button>`
       : `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>`;
   }
@@ -1991,16 +2005,17 @@ function fileCard(f) {
 }
 async function renderBoard() {
   const bf = (S.board ||= { stage: "all", q: "", limit: 60 });
-  shell(`${dashTabsHtml()}
+  const own = isOwner();
+  shell(`${own ? dashTabsHtml() : ""}
     <div class="board">
-      <div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
-      <div id="syncResult"></div>
+      ${own ? `<div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
+      <div id="syncResult"></div>` : ""}
       <div class="bpills" id="bPills">${STAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
       <p class="muted small bhint" id="bHint"></p>
       <div class="bsearch"><input id="bQ" type="search" placeholder="Search file #, car, VIN, shop…"><button class="btn ghost sm" id="bRefresh" title="Refresh">↻</button></div>
       <div id="bList" class="fgrid"><div class="muted">Loading…</div></div>
     </div>`, { title: "Files" });
-  wireDashTabs();
+  if (own) wireDashTabs();
   $("#bQ").value = bf.q;
   let files = [];
   const load = async () => {
@@ -2040,9 +2055,9 @@ async function renderBoard() {
   $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); b.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" }); };
   let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
   $("#bRefresh").onclick = load;
-  wireSyncBar(load);
+  if (own) wireSyncBar(load);
   await load();
-  autoSyncJobs().then((n) => { if (n && S.view === "dash" && S.dashTab === "board") load(); });
+  autoSyncJobs().then((n) => { if (n && (S.view === "home" || (S.view === "dash" && S.dashTab === "board"))) load(); });
   fillDistancesHere(() => { if (S.view === "dash" && S.dashTab === "board") load(); });
 }
 
