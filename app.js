@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.21.1";
+const VERSION = "1.21.2";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1652,7 +1652,8 @@ async function renderBoard() {
     $$("#bPills [data-n]").forEach((b) => (b.textContent = b.dataset.n === "all" ? active : counts[b.dataset.n] || 0));
     $$("#bPills .bpill").forEach((b) => b.classList.toggle("on", b.dataset.st === bf.stage));
     $("#bHint").textContent = STAGES.find(([k]) => k === bf.stage)?.[3] || "";
-    let rows = files.filter((f) => match(f) && (bf.stage === "all" ? f.stage !== "done" : f.stage === bf.stage));
+    // searching under "All files" also finds finished files
+    let rows = files.filter((f) => match(f) && (bf.stage === "all" ? (words.length || f.stage !== "done") : f.stage === bf.stage));
     const by = (f) => f.stage === "topick" ? (f.job?.status === "hold" ? "9" : "") + (f.job?.due_date || "9999") : f.stage === "done" ? "" : (f.picked || "9999");
     rows.sort((x, y) => bf.stage === "all" ? (order[x.stage] - order[y.stage]) || by(x).localeCompare(by(y)) : bf.stage === "done" ? (y.done || y.picked || "").localeCompare(x.done || x.picked || "") : by(x).localeCompare(by(y)));
     const shown = rows.slice(0, bf.limit);
