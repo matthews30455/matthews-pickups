@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.23.0";
+const VERSION = "1.24.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -490,6 +490,7 @@ function go(view, arg) {
   if (view === "drivers") return renderDrivers();
   if (view === "detail") return renderDetail(arg);
   if (view === "sheet") return renderSheet(arg);
+  if (view === "drop") return renderDropForm(arg);
 }
 
 // ─────────────────────────────────────────────────────────────── outbox sync
@@ -1270,7 +1271,7 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
-const DASH_TABS = [["board", "Files"], ["all", "Table & reports"]];
+const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["all", "Reports"]];
 const STATUS_OPTS = {
   all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
@@ -1489,6 +1490,7 @@ async function renderPickedTab(wrap) {
 }
 
 async function renderDash() {
+  if (S.dashTab === "drop") return renderDrop();
   if (S.dashTab === "board" || !DASH_TABS.some(([v]) => v === S.dashTab)) { S.dashTab = "board"; return renderBoard(); }
   if (S.dashTab === "picked") {
     shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
@@ -1550,6 +1552,220 @@ async function renderDash() {
   dailyCleanup();
 }
 
+// ─────────────────────────────────────────────────────────────── Progi drop-off files (CZ-A…, P2-A…, PZ-A…, HW-A…)
+// We tow these from a shop to a recycler. No photos — only pickup date, drop-off date, payment + the shop invoice.
+const DSTAGES = [
+  ["all", "All files", "st-grey", "Every open drop-off file"],
+  ["topick", "To pick up", "st-amber", "Waiting for us to pick up and deliver"],
+  ["record", "Dates & invoice", "st-red", "Delivered — enter pickup/drop-off date, payment and the shop invoice"],
+  ["send", "Invoice → Progi", "st-purple", "Shop invoice ready — needs to be uploaded to Progi"],
+  ["qb", "QuickBooks invoice", "st-blue", "Our flat-rate invoice still has to be made in QuickBooks and sent to Progi"],
+  ["done", "Done", "st-green", "Both invoices are in Progi"],
+];
+const DSTAGE = Object.fromEntries(DSTAGES.map(([k, l, c]) => [k, { label: l, cls: c }]));
+const RECYCLER = (n) => /carz/i.test(n || "") ? "Carz" : /pic n save/i.test(n || "") ? "Pic N Save" : /plazek/i.test(n || "") ? "Plazek" : /hollywood/i.test(n || "") ? "Hollywood North" : (n || "");
+function dropStage(d) {
+  const old = d.call_date && d.call_date < dayKey(new Date(Date.now() - 45 * 864e5));
+  if (d.progi_flat_docs > 0 || d.qb_status === "done") return "done";
+  if (!d.dropped_off_on && d.progi_status !== "Delivered") return "topick";
+  const missing = !d.picked_up_on || !d.dropped_off_on || d.paid == null || (d.paid && (!d.invoice_path || !(+d.amount > 0)));
+  if (missing) return old && !d.picked_up_on ? "done" : "record";          // old history from before the app: don't nag
+  if (d.paid && d.progi_invoice_docs === 0 && d.app_status !== "done") return "send";
+  return "qb";
+}
+function dropMissing(d) {
+  const m = [];
+  if (!d.picked_up_on) m.push("pickup date");
+  if (!d.dropped_off_on) m.push("drop-off date");
+  if (d.paid == null) m.push("payment");
+  else if (d.paid && !(+d.amount > 0)) m.push("amount");
+  if (d.paid && !d.invoice_path) m.push("invoice");
+  return m;
+}
+function dropCard(d) {
+  const st = DSTAGE[d.stage];
+  const veh = [d.year, d.make, d.model].filter(Boolean).join(" ");
+  const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`, `<span class="schip st-soft">→ ${esc(RECYCLER(d.recycler))}</span>`];
+  if (d.stage === "send" && d.app_status === "queued") chips.push(`<span class="schip st-purple">📤 In queue</span>`);
+  const today = dayKey(new Date());
+  if (d.stage === "topick" && d.due_date) chips.push(`<span class="schip ${d.due_date < today ? "st-red" : "st-soft"}">${d.due_date < today ? "Late · " : ""}Due ${esc(d.due_date)}</span>`);
+  const addr = [d.pickup_address, d.pickup_city].filter(Boolean).join(", ");
+  const miss = d.stage === "record" ? dropMissing(d) : [];
+  const dates = d.picked_up_on || d.dropped_off_on
+    ? `Picked up <b>${esc(d.picked_up_on || "—")}</b> · Dropped off <b>${esc(d.dropped_off_on || "—")}</b>` : d.progi_pickup_date && d.stage !== "topick" ? `Progi pickup ${esc(d.progi_pickup_date)}` : "";
+  const pay = d.paid ? `<b>${money(d.amount)}</b> ${esc(PAY_LABEL[d.payment_type] || "")}${d.invoice_path ? " · 🧾 invoice" : ""}` : d.paid === false ? "no payment" : "";
+  return `<article class="fcard ${st.cls}">
+    <div class="fhead"><b class="mono">${esc(d.file_number)}</b><span class="fveh">${esc(veh || "—")}</span></div>
+    <div class="fchips">${chips.join("")}</div>
+    <div class="fline">${d.pickup_name ? `<b>${esc(d.pickup_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}</div>
+    ${d.stage === "topick" && d.pickup_phone ? `<div class="fline muted"><a href="tel:${esc(String(d.pickup_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(d.pickup_phone))}</a></div>` : ""}
+    ${dates || pay ? `<div class="fline">${[dates, pay].filter(Boolean).join(" · ")}</div>` : ""}
+    ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
+    ${d.stage === "qb" ? `<div class="fline muted">Shop invoice ${d.progi_invoice_docs ? "✓ in Progi" : d.paid === false ? "not needed" : "—"} · QuickBooks invoice ✗</div>` : ""}
+    <div class="facts">${d.ticket_token ? `<button class="btn ghost sm" data-dsheet="${esc(d.file_number)}">📄 Pickup sheet</button>` : ""}
+      ${d.stage === "qb" && isOwner() ? `<button class="btn ghost sm" data-dqb="${d.id}">✓ QuickBooks done</button>` : ""}
+      <button class="btn ${["topick", "record"].includes(d.stage) ? "primary" : "ghost"} sm" data-dopen="${d.id}">${d.stage === "topick" ? "Record pickup →" : d.stage === "record" ? "Enter dates & invoice →" : "Open"}</button></div>
+  </article>`;
+}
+async function renderDrop() {
+  const bf = (S.dboard ||= { stage: "all", q: "", limit: 60 });
+  shell(`${dashTabsHtml()}
+    <div class="board">
+      <div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
+      <div id="syncResult"></div>
+      <div class="bpills" id="bPills">${DSTAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
+      <p class="muted small bhint" id="bHint"></p>
+      <div class="bsearch"><input id="bQ" type="search" placeholder="Search CZ-A7423, 7423, car, VIN, shop…"><button class="btn ghost sm" id="bRefresh" title="Refresh">↻</button></div>
+      <div id="bList" class="fgrid"><div class="muted">Loading…</div></div>
+    </div>`, { title: "Progi drop-off" });
+  wireDashTabs();
+  $("#bQ").value = bf.q;
+  let rows = [];
+  const load = async () => {
+    const { data, error } = await sb.from("dropoffs").select("*").order("call_date", { ascending: false, nullsFirst: false }).limit(2000);
+    if (error) { $("#bList").innerHTML = `<div class="empty">${/does not exist|dropoffs/.test(error.message) ? "Drop-off files are not set up yet." : "Couldn't load: " + esc(error.message)}</div>`; return; }
+    rows = (data || []).map((d) => ({ ...d, stage: dropStage(d),
+      search: [d.file_number, d.file_number.replace("-", ""), d.year, d.make, d.model, d.vin, d.pickup_name, d.pickup_city, d.recycler].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "") }));
+    draw();
+  };
+  const order = { topick: 0, record: 1, send: 2, qb: 3, done: 4 };
+  const draw = () => {
+    const words = String(bf.q || "").toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "").replace(/^(cz|p2|pz|hw|mt)?a?(?=\d{4})/, "")).filter(Boolean);
+    const match = (d) => !words.length || words.every((w) => d.search.includes(w));
+    const counts = {}; let active = 0;
+    for (const d of rows) if (match(d)) { counts[d.stage] = (counts[d.stage] || 0) + 1; if (d.stage !== "done") active++; }
+    $$("#bPills [data-n]").forEach((b) => (b.textContent = b.dataset.n === "all" ? active : counts[b.dataset.n] || 0));
+    $$("#bPills .bpill").forEach((b) => b.classList.toggle("on", b.dataset.st === bf.stage));
+    $("#bHint").textContent = DSTAGES.find(([k]) => k === bf.stage)?.[3] || "";
+    let list = rows.filter((d) => match(d) && (bf.stage === "all" ? (words.length || d.stage !== "done") : d.stage === bf.stage));
+    list.sort((x, y) => bf.stage === "all" ? (order[x.stage] - order[y.stage]) || String(y.call_date).localeCompare(String(x.call_date)) : String(y.dropped_off_on || y.call_date).localeCompare(String(x.dropped_off_on || x.call_date)));
+    const shown = list.slice(0, bf.limit);
+    $("#bList").innerHTML = list.length ? shown.map(dropCard).join("") + (list.length > shown.length ? `<button class="btn ghost bmore" id="bMore">Show more (${list.length - shown.length})</button>` : "")
+      : `<div class="empty">${bf.q ? "Nothing matches your search." : "Nothing here."}</div>`;
+    $$("#bList [data-dopen]").forEach((b) => (b.onclick = () => go("drop", b.dataset.dopen)));
+    $$("#bList [data-dsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = "dash"; go("sheet", b.dataset.dsheet); }));
+    $$("#bList [data-dqb]").forEach((b) => (b.onclick = async () => {
+      const { error } = await sb.from("dropoffs").update({ qb_status: "done", updated_at: new Date().toISOString() }).eq("id", b.dataset.dqb);
+      if (error) return toast(error.message, "err");
+      const d = rows.find((x) => x.id === b.dataset.dqb); if (d) { d.qb_status = "done"; d.stage = dropStage(d); }
+      toast("Marked done ✓", "ok"); draw();
+    }));
+    const more = $("#bMore"); if (more) more.onclick = () => { bf.limit += 60; draw(); };
+  };
+  $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); };
+  let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
+  $("#bRefresh").onclick = load;
+  wireSyncBar(load);
+  await load();
+}
+/** one drop-off file: dates, payment, shop invoice */
+async function renderDropForm(id) {
+  const back = () => { S.dashTab = "drop"; go("dash"); };
+  shell(`<div class="muted">Loading…</div>`, { title: "Drop-off", back });
+  const { data: d, error } = await sb.from("dropoffs").select("*").eq("id", id).single();
+  if (error) { $(".main").innerHTML = `<div class="empty">${esc(error.message)}</div>`; return; }
+  const veh = [d.year, d.make, d.model].filter(Boolean).join(" ");
+  const f = { picked_up_on: d.picked_up_on || d.progi_pickup_date || dayKey(new Date()), dropped_off_on: d.dropped_off_on || d.picked_up_on || d.progi_pickup_date || dayKey(new Date()),
+    paid: d.paid, amount: d.amount ?? "", hst_included: d.hst_included ?? true, payment_type: d.payment_type || "", cheque_number: d.cheque_number || "", notes: d.notes || "" };
+  let pages = [], pdfFile = null;
+  shell(`<form class="card stack" id="dForm" novalidate>
+      <div><b class="mono big">${esc(d.file_number)}</b> <span class="muted">${esc(veh)}</span>
+        <div class="muted small">${esc(d.pickup_name || "")}${d.pickup_city ? " · " + esc(d.pickup_city) : ""} → ${esc(RECYCLER(d.recycler))}${d.vin ? ` · <span class="mono">${esc(d.vin)}</span>` : ""}</div></div>
+      <div class="row2">
+        <label class="field"><span>Pickup date *</span><input type="date" name="picked_up_on" value="${esc(f.picked_up_on)}"></label>
+        <label class="field"><span>Drop-off date *</span><input type="date" name="dropped_off_on" value="${esc(f.dropped_off_on)}"></label>
+      </div>
+      <div class="field"><span>Paid the shop? *</span>
+        <div class="chips two" data-chips="paid"><button type="button" data-val="true">Yes, paid</button><button type="button" data-val="false">No payment</button></div></div>
+      <div id="dPaid" class="stack">
+        <label class="field"><span>Amount ($) *</span><input name="amount" inputmode="decimal" placeholder="0.00" value="${esc(f.amount)}"></label>
+        <div class="field"><span>Is HST in that amount?</span>
+          <div class="chips two" data-chips="hst_included"><button type="button" data-val="true">Includes HST</button><button type="button" data-val="false">Before HST</button></div></div>
+        <div class="field"><span>Payment type *</span>
+          <div class="chips" data-chips="payment_type">${PAY_TYPES.map(([v, l]) => `<button type="button" data-val="${v}">${l}</button>`).join("")}</div></div>
+        <label class="field" id="dCheque"><span>Cheque #</span><input name="cheque_number" inputmode="numeric" maxlength="20" value="${esc(f.cheque_number)}"></label>
+        <div class="field"><span>Shop invoice ${d.invoice_path ? "" : "*"}</span>
+          ${d.invoice_path ? `<div class="btnrow"><button type="button" class="btn ghost sm" id="dInvOpen">📄 Open current invoice</button><span class="muted small">Add a new one below to replace it</span></div>` : ""}
+          <div class="btnrow"><label class="btn filebtn">📷 Scan invoice<input type="file" accept="image/*" capture="environment" id="dCam" hidden></label>
+            <label class="btn ghost filebtn">Photo / PDF file<input type="file" accept="image/*,.heic,.heif,application/pdf" multiple id="dGal" hidden></label></div>
+          <div id="dInvInfo" class="muted small"></div></div>
+      </div>
+      <label class="field"><span>Notes</span><textarea name="notes" rows="2">${esc(f.notes)}</textarea></label>
+      ${d.instructions && isOwner() ? `<p class="muted small"><b>Progi instructions:</b> ${esc(d.instructions)}</p>` : ""}
+      <p class="err-text" id="dErr"></p>
+      <div class="savebar">${d.app_status === "done" || d.progi_invoice_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 Save &amp; send invoice to Progi</button>`}
+        <button class="btn ${d.app_status === "done" || d.progi_invoice_docs ? "primary big" : ""}" type="submit" id="dSave">💾 Save</button></div>
+    </form>`, { title: d.file_number, back });
+  const form = $("#dForm");
+  const paint = () => {
+    $$("[data-chips]", form).forEach((g) => { const k = g.dataset.chips; $$("button", g).forEach((b) => { const on = String(f[k]) === b.dataset.val; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); }); });
+    $("#dPaid").hidden = f.paid !== true;
+    $("#dCheque").hidden = f.payment_type !== "cheque";
+    const sendB = $("#dSend"); if (sendB) sendB.hidden = f.paid === false;
+  };
+  form.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-chips] button"); if (!b) return;
+    const k = b.closest("[data-chips]").dataset.chips, v = b.dataset.val;
+    f[k] = v === "true" ? true : v === "false" ? false : v; paint();
+  });
+  paint();
+  if ($("#dInvOpen")) $("#dInvOpen").onclick = async () => { const w = window.open("", "_blank"); try { const u = await signedUrl(d.invoice_path); if (w) w.location = u; else location.href = u; } catch (e) { w?.close(); toast(e.message, "err"); } };
+  const addFiles = async (files) => {
+    $("#dInvInfo").textContent = "Reading…";
+    try {
+      for (const file of files) {
+        if (/pdf/i.test(file.type) || /\.pdf$/i.test(file.name)) { pdfFile = file; pages = []; }
+        else { pdfFile = null; pages.push(await scanInvoice(file)); }
+      }
+      $("#dInvInfo").textContent = pdfFile ? `✓ PDF: ${pdfFile.name}` : `✓ ${pages.length} page${pages.length > 1 ? "s" : ""} scanned — will be saved as one PDF`;
+    } catch (e) { $("#dInvInfo").textContent = "Could not read: " + e.message; }
+  };
+  $("#dCam").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
+  $("#dGal").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
+  preloadPdf();
+  let sendAfter = false;
+  $("#dSend") && ($("#dSend").onclick = () => { sendAfter = true; form.requestSubmit(); });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const send = sendAfter; sendAfter = false;
+    const fd = new FormData(form);
+    const row = { picked_up_on: fd.get("picked_up_on") || null, dropped_off_on: fd.get("dropped_off_on") || null, paid: f.paid,
+      amount: f.paid ? Math.round(+String(fd.get("amount") || "").replace(/[^\d.]/g, "") * 100) / 100 || null : null,
+      hst_included: f.paid ? !!f.hst_included : null, payment_type: f.paid ? f.payment_type || null : null,
+      cheque_number: f.paid && f.payment_type === "cheque" ? String(fd.get("cheque_number") || "").trim() || null : null,
+      notes: String(fd.get("notes") || "").trim() || null, updated_at: new Date().toISOString() };
+    const errs = [];
+    if (row.picked_up_on && row.dropped_off_on && row.dropped_off_on < row.picked_up_on) errs.push("Drop-off date is before the pickup date");
+    if (row.dropped_off_on && row.dropped_off_on > dayKey(new Date())) errs.push("Drop-off date is in the future");
+    if (send) {
+      if (!row.picked_up_on || !row.dropped_off_on) errs.push("Enter both dates");
+      if (row.paid == null) errs.push("Paid the shop? Tap Yes or No");
+      if (row.paid && !(row.amount > 0)) errs.push("Enter the amount");
+      if (row.paid && !row.payment_type) errs.push("Pick the payment type");
+      if (row.paid && !d.invoice_path && !pages.length && !pdfFile) errs.push("Add the shop invoice");
+    }
+    if (errs.length) { $("#dErr").textContent = errs.join(" · "); return; }
+    $("#dErr").textContent = "";
+    const btn = send ? $("#dSend") : $("#dSave"); btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      if (pages.length || pdfFile) {
+        const blob = pdfFile || await buildPdf(pages, d.file_number);
+        const path = d.invoice_path || `${S.user.id}/dropoffs/${d.file_number}/invoice.pdf`;
+        const { error: ue } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: "application/pdf", upsert: true });
+        if (ue) throw ue;
+        row.invoice_path = path;
+      }
+      if (!d.driver_id) row.driver_id = S.user.id;
+      if (send) row.app_status = "queued";
+      if (row.paid === false && row.picked_up_on && row.dropped_off_on && d.app_status === "todo") row.app_status = "done";   // nothing to send
+      const { error: e2 } = await sb.from("dropoffs").update(row).eq("id", d.id);
+      if (e2) throw e2;
+      toast(send ? "Saved ✓ — invoice queued for Progi" : "Saved ✓", "ok");
+      back();
+    } catch (err) { $("#dErr").textContent = err.message || "Could not save"; btn.disabled = false; btn.textContent = send ? "📤 Save & send invoice to Progi" : "💾 Save"; }
+  };
+}
+
 // ─────────────────────────────────────────────────────────────── server sync with Progi (Edge Function progi-sync)
 const SYNC_FN = SUPABASE_URL.replace(/\/$/, "") + "/functions/v1/progi-sync";
 const ago = (t) => { if (!t) return "never"; const m = Math.round((Date.now() - new Date(t)) / 60000); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : dayKey(t); };
@@ -1568,6 +1784,8 @@ function syncSummaryHtml(s) {
   if (s.nowPicked?.length) parts.push(`🚛 <b>${s.nowPicked.length}</b> picked up → In yard <span class="muted">(${list(s.nowPicked)})</span>`);
   if (s.nowHold?.length) parts.push(`⏸ <b>${s.nowHold.length}</b> put on hold <span class="muted">(${list(s.nowHold)})</span>`);
   if (s.submitted?.length) parts.push(`✅ <b>${s.submitted.length}</b> marked submitted <span class="muted">(${list(s.submitted)})</span>`);
+  if (s.newDrop?.length) parts.push(`🚚 <b>${s.newDrop.length}</b> new drop-off file${s.newDrop.length > 1 ? "s" : ""} <span class="muted">(${s.newDrop.slice(0, 6).join(", ")})</span>`);
+  if (s.delivered?.length) parts.push(`📦 <b>${s.delivered.length}</b> drop-off delivered <span class="muted">(${s.delivered.slice(0, 6).join(", ")})</span>`);
   if (s.gone?.length) parts.push(`🗑 <b>${s.gone.length}</b> cancelled / closed in Progi <span class="muted">(${list(s.gone)})</span>`);
   return parts.length ? parts.map((p) => `<div>${p}</div>`).join("") : `<div class="muted">No changes — the app already matched Progi.</div>`;
 }
@@ -1949,8 +2167,9 @@ async function renderSheet(fn) {
   shell(`<div id="sheet" class="sheet"><div class="muted">Loading pickup sheet…</div></div>`, { title: "Pickup sheet " + fn, back });
   const el = $("#sheet");
   try {
-    const { data: j, error } = await sb.from("progi_jobs").select("file_number, ticket_token").eq("file_number", fn).maybeSingle();
+    let { data: j, error } = await sb.from("progi_jobs").select("file_number, ticket_token").eq("file_number", fn).maybeSingle();
     if (error) throw error;
+    if (!j) ({ data: j } = await sb.from("dropoffs").select("file_number, ticket_token").eq("file_number", fn).maybeSingle());
     if (!j?.ticket_token) throw new Error("No pickup sheet for this file yet.");
     const res = await fetch(PIX_TICKET + encodeURIComponent(j.ticket_token) + "?locale=en");
     if (!res.ok) throw new Error("Progi has no pickup sheet for this file right now (it may be on hold).");
