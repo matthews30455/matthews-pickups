@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.24.0";
+const VERSION = "1.25.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -450,13 +450,14 @@ const NAV_ICON = (() => {
     jobs: svg('<path d="M3 16V7a1 1 0 0 1 1-1h10v10"/><path d="M14 9h4l3 4v3h-7"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>'),
     yard: svg('<rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/><path d="M8 7l1.5-3h5L16 7"/>'),
     form: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
+    drops: svg('<path d="M2 17V6h11v11"/><path d="M13 10h4l4 4v3h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M5 10h5M7.5 7.5 10 10l-2.5 2.5"/>'),
     drivers: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.5a5 5 0 0 1 5.5 5"/>'),
   };
 })();
 function shell(inner, { title = "", back = null } = {}) {
   const tabs = isOwner()
     ? [["dash", "Dashboard"], ["jobs", "To pick up"], ["form", "New pickup"], ["drivers", "Drivers"]]
-    : [["home", "My pickups"], ["jobs", "To pick up"], ["yard", "In yard"], ["form", "New pickup"]];
+    : [["home", "My pickups"], ["jobs", "To pick up"], ["yard", "In yard"], ["drops", "Drop-off"], ["form", "New pickup"]];
   $("#app").innerHTML = `
     <header class="top">
       ${back ? `<button class="iconbtn" id="backBtn" aria-label="Back">‹</button>` : ""}<img class="toplogo" src="logo.png" alt="Matthews">
@@ -491,6 +492,7 @@ function go(view, arg) {
   if (view === "detail") return renderDetail(arg);
   if (view === "sheet") return renderSheet(arg);
   if (view === "drop") return renderDropForm(arg);
+  if (view === "drops") return renderDrop();
 }
 
 // ─────────────────────────────────────────────────────────────── outbox sync
@@ -1609,22 +1611,25 @@ function dropCard(d) {
 }
 async function renderDrop() {
   const bf = (S.dboard ||= { stage: "all", q: "", limit: 60 });
-  shell(`${dashTabsHtml()}
+  const own = isOwner();
+  const stages = own ? DSTAGES : DSTAGES.filter(([k]) => ["all", "topick", "record", "done"].includes(k));
+  if (!stages.some(([k]) => k === bf.stage)) bf.stage = "all";
+  shell(`${own ? dashTabsHtml() : ""}
     <div class="board">
-      <div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
-      <div id="syncResult"></div>
-      <div class="bpills" id="bPills">${DSTAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
+      ${own ? `<div class="syncbar" id="syncBar"><div class="syncinfo" id="syncInfo">Checking Progi link…</div><button class="btn primary sm" id="syncBtn">🔄 Update from Progi</button></div>
+      <div id="syncResult"></div>` : `<p class="muted small tabnote">Drop-off files (CZ, P2, PZ, HW): no photos — just the pickup date, drop-off date, payment and the shop invoice.</p>`}
+      <div class="bpills" id="bPills">${stages.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
       <p class="muted small bhint" id="bHint"></p>
       <div class="bsearch"><input id="bQ" type="search" placeholder="Search CZ-A7423, 7423, car, VIN, shop…"><button class="btn ghost sm" id="bRefresh" title="Refresh">↻</button></div>
       <div id="bList" class="fgrid"><div class="muted">Loading…</div></div>
     </div>`, { title: "Progi drop-off" });
-  wireDashTabs();
+  if (own) wireDashTabs();
   $("#bQ").value = bf.q;
   let rows = [];
   const load = async () => {
     const { data, error } = await sb.from("dropoffs").select("*").order("call_date", { ascending: false, nullsFirst: false }).limit(2000);
     if (error) { $("#bList").innerHTML = `<div class="empty">${/does not exist|dropoffs/.test(error.message) ? "Drop-off files are not set up yet." : "Couldn't load: " + esc(error.message)}</div>`; return; }
-    rows = (data || []).map((d) => ({ ...d, stage: dropStage(d),
+    rows = (data || []).map((d) => ({ ...d, stage: own ? dropStage(d) : (["send", "qb"].includes(dropStage(d)) ? "done" : dropStage(d)),
       search: [d.file_number, d.file_number.replace("-", ""), d.year, d.make, d.model, d.vin, d.pickup_name, d.pickup_city, d.recycler].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "") }));
     draw();
   };
@@ -1636,7 +1641,7 @@ async function renderDrop() {
     for (const d of rows) if (match(d)) { counts[d.stage] = (counts[d.stage] || 0) + 1; if (d.stage !== "done") active++; }
     $$("#bPills [data-n]").forEach((b) => (b.textContent = b.dataset.n === "all" ? active : counts[b.dataset.n] || 0));
     $$("#bPills .bpill").forEach((b) => b.classList.toggle("on", b.dataset.st === bf.stage));
-    $("#bHint").textContent = DSTAGES.find(([k]) => k === bf.stage)?.[3] || "";
+    $("#bHint").textContent = own ? DSTAGES.find(([k]) => k === bf.stage)?.[3] || "" : { all: "Files still to do", topick: "Waiting to be picked up and delivered", record: "Delivered — enter the dates, payment and shop invoice", done: "Recorded — nothing more to do" }[bf.stage];
     let list = rows.filter((d) => match(d) && (bf.stage === "all" ? (words.length || d.stage !== "done") : d.stage === bf.stage));
     list.sort((x, y) => bf.stage === "all" ? (order[x.stage] - order[y.stage]) || String(y.call_date).localeCompare(String(x.call_date)) : String(y.dropped_off_on || y.call_date).localeCompare(String(x.dropped_off_on || x.call_date)));
     const shown = list.slice(0, bf.limit);
@@ -1655,12 +1660,12 @@ async function renderDrop() {
   $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); };
   let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
   $("#bRefresh").onclick = load;
-  wireSyncBar(load);
+  if (own) wireSyncBar(load);
   await load();
 }
 /** one drop-off file: dates, payment, shop invoice */
 async function renderDropForm(id) {
-  const back = () => { S.dashTab = "drop"; go("dash"); };
+  const back = () => { if (isOwner()) { S.dashTab = "drop"; go("dash"); } else go("drops"); };
   shell(`<div class="muted">Loading…</div>`, { title: "Drop-off", back });
   const { data: d, error } = await sb.from("dropoffs").select("*").eq("id", id).single();
   if (error) { $(".main").innerHTML = `<div class="empty">${esc(error.message)}</div>`; return; }
@@ -1693,7 +1698,7 @@ async function renderDropForm(id) {
       <label class="field"><span>Notes</span><textarea name="notes" rows="2">${esc(f.notes)}</textarea></label>
       ${d.instructions && isOwner() ? `<p class="muted small"><b>Progi instructions:</b> ${esc(d.instructions)}</p>` : ""}
       <p class="err-text" id="dErr"></p>
-      <div class="savebar">${d.app_status === "done" || d.progi_invoice_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 Save &amp; send invoice to Progi</button>`}
+      <div class="savebar">${d.app_status === "done" || d.progi_invoice_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send invoice to Progi" : "Done — send to the office"}</button>`}
         <button class="btn ${d.app_status === "done" || d.progi_invoice_docs ? "primary big" : ""}" type="submit" id="dSave">💾 Save</button></div>
     </form>`, { title: d.file_number, back });
   const form = $("#dForm");
