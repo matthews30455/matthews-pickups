@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.20.0";
+const VERSION = "1.21.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -342,7 +342,7 @@ const S = {
   suggestions: JSON.parse(localStorage.getItem("mp-sugg") || "[]"),
   shops: JSON.parse(localStorage.getItem("mp-shops-all") || "[]"),
   filters: { range: "7", from: "", to: "", driver: "", pay: "", progi: "", pickedProgi: "notsub", q: "", sort: "picked_up_at", asc: false },
-  dashTab: "all",
+  dashTab: "board",
   list: [],
   outboxCount: 0,
 };
@@ -442,6 +442,17 @@ async function logout() {
 }
 
 // ─────────────────────────────────────────────────────────────── shell
+const NAV_ICON = (() => {
+  const svg = (d) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  return {
+    dash: svg('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
+    home: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/>'),
+    jobs: svg('<path d="M3 16V7a1 1 0 0 1 1-1h10v10"/><path d="M14 9h4l3 4v3h-7"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>'),
+    yard: svg('<rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/><path d="M8 7l1.5-3h5L16 7"/>'),
+    form: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
+    drivers: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.5a5 5 0 0 1 5.5 5"/>'),
+  };
+})();
 function shell(inner, { title = "", back = null } = {}) {
   const tabs = isOwner()
     ? [["dash", "Dashboard"], ["jobs", "To pick up"], ["form", "New pickup"], ["drivers", "Drivers"]]
@@ -455,7 +466,7 @@ function shell(inner, { title = "", back = null } = {}) {
     </header>
     <div id="outboxBar"></div>
     <main class="main">${inner}</main>
-    ${back ? "" : `<nav class="tabs">${tabs.map(([v, l]) => `<button data-go="${v}" class="${S.view === v ? "on" : ""}">${l}</button>`).join("")}</nav>`}`;
+    ${back ? "" : `<nav class="tabs">${tabs.map(([v, l]) => `<button data-go="${v}" class="${S.view === v ? "on" : ""}">${NAV_ICON[v] || ""}<span>${l}</span></button>`).join("")}</nav>`}`;
   $("#menuBtn").onclick = logout;
   if (back) $("#backBtn").onclick = back;
   $$("[data-go]").forEach((b) => (b.onclick = () => go(b.dataset.go)));
@@ -1250,7 +1261,7 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
-const DASH_TABS = [["all", "Dashboard"], ["topick", "To pick up"], ["picked", "Picked up"], ["submitted", "Submitted"]];
+const DASH_TABS = [["board", "Files"], ["all", "Table & reports"]];
 const STATUS_OPTS = {
   all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
@@ -1469,6 +1480,7 @@ async function renderPickedTab(wrap) {
 }
 
 async function renderDash() {
+  if (S.dashTab === "board" || !DASH_TABS.some(([v]) => v === S.dashTab)) { S.dashTab = "board"; return renderBoard(); }
   if (S.dashTab === "picked") {
     shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
     wireDashTabs();
@@ -1527,6 +1539,135 @@ async function renderDash() {
   $("#fDriver").value = fl.driver;
   loadDash();
   dailyCleanup();
+}
+
+// ─────────────────────────────────────────────────────────────── Files board (owner home)
+/** every file walks through these stages; the board shows one row of tappable stage chips with counts */
+const STAGES = [
+  ["all", "All files", "", "All open work and finished files"],
+  ["topick", "To pick up", "st-amber", "Released by Progi, not picked up yet (on hold included)"],
+  ["photos", "Picked up · needs photos", "st-red", "In our yard, nobody has taken the photos yet"],
+  ["finish", "Photos in · finish file", "st-blue", "Photos taken — invoice, payment or details still missing"],
+  ["queue", "Ready · Progi queue", "st-purple", "Complete — waiting to be sent to Progi"],
+  ["done", "Done", "st-green", "Submitted in Progi"],
+];
+const STAGE = Object.fromEntries(STAGES.map(([k, l, c]) => [k, { label: l, cls: c }]));
+function fileStage(f) {
+  const a = f.app, j = f.job;
+  if ((a && a.progi_status === "submitted") || (j && j.form_done)) return "done";
+  if (a && a.progi_status === "queued") return "queue";
+  if (!a && j && (j.status === "open" || j.status === "hold")) return "topick";
+  if (a && (a.photo_paths || []).length) return "finish";
+  return "photos";
+}
+/** what still blocks a file from going to Progi */
+function fileMissing(f) {
+  const a = f.app; if (!a) return [];
+  const m = [], n = (a.photo_paths || []).length;
+  if (n < PROGI_MIN_PHOTOS) m.push(`${n}/${PROGI_MIN_PHOTOS} photos`);
+  if (a.paid && !a.invoice_path) m.push("invoice");
+  if (a.paid && !a.amount) m.push("amount");
+  if (a.draft) m.push("draft");
+  return m;
+}
+async function loadFiles() {
+  const [jr, ar] = await Promise.all([
+    sb.from("progi_jobs").select("file_number, status, pix_status, form_done, picked_date, year, make, model, vin, shop_name, shop_address, shop_city, shop_phone, due_date, est_total, ticket_token, assigned_driver").in("status", ["open", "hold", "picked"]).limit(3000),
+    sb.from("pickups").select("id, file_number, year, make, model, vin, color, photo_paths, invoice_path, draft, paid, amount, payment_type, progi_status, progi_submitted_at, picked_up_at, recorded_at, driver_id, shop_name").order("recorded_at", { ascending: false }).limit(3000),
+  ]);
+  if (jr.error) throw jr.error;
+  if (ar.error) throw ar.error;
+  const map = new Map();
+  for (const j of jr.data || []) map.set(j.file_number, { fn: j.file_number, job: j, app: null });
+  for (const a of ar.data || []) { const f = map.get(a.file_number) || { fn: a.file_number, job: null, app: null }; if (!f.app) f.app = a; map.set(a.file_number, f); }
+  const files = [...map.values()];
+  for (const f of files) {
+    const s = f.app || f.job;
+    f.stage = fileStage(f);
+    f.veh = [s.year || f.job?.year, s.make || f.job?.make, s.model || f.job?.model].filter(Boolean).join(" ");
+    f.picked = f.job?.picked_date || (f.app ? dayKey(f.app.picked_up_at || f.app.recorded_at) : "");
+    f.done = f.app?.progi_submitted_at ? dayKey(f.app.progi_submitted_at) : "";
+    f.search = [f.fn, f.veh, f.app?.vin || f.job?.vin, f.app?.color, f.job?.shop_name, f.job?.shop_city, f.app?.shop_name].join(" ").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+  return files;
+}
+function fileCard(f) {
+  const j = f.job, a = f.app, st = STAGE[f.stage];
+  const today = dayKey(new Date());
+  const late = f.stage === "topick" && j?.status === "open" && j.due_date && j.due_date < today;
+  const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`];
+  if (j?.status === "hold" && f.stage === "topick") chips.push(`<span class="schip st-grey">On hold</span>`);
+  if (j?.pix_status === "atAuction" && f.stage !== "done") chips.push(`<span class="schip st-grey">At auction</span>`);
+  if (j?.pix_status === "sold" && f.stage !== "done") chips.push(`<span class="schip st-grey">Sold</span>`);
+  if (late) chips.push(`<span class="schip st-red">Late · due ${esc(j.due_date)}</span>`);
+  else if (f.stage === "topick" && j?.due_date) chips.push(`<span class="schip st-soft">Due ${esc(j.due_date)}</span>`);
+  let info = "", acts = "";
+  if (f.stage === "topick") {
+    const addr = [j.shop_address, j.shop_city].filter(Boolean).join(", ");
+    info = `<div class="fline">${j.shop_name ? `<b>${esc(j.shop_name)}</b>` : ""}${addr ? ` · <a href="https://maps.google.com/?q=${encodeURIComponent(addr)}" target="_blank" rel="noopener">${esc(addr)}</a>` : ""}</div>
+      <div class="fline muted">${j.shop_phone ? `<a href="tel:${esc(String(j.shop_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(j.shop_phone))}</a> · ` : ""}${j.est_total == null ? "" : +j.est_total > 0 ? `Pay ≈ <b>${money(j.est_total)}</b>` : "Nothing to pay"}${j.assigned_driver ? ` · 👤 ${esc(driverName(j.assigned_driver))}` : ""}</div>`;
+    acts = `${j.ticket_token ? `<button class="btn ghost sm" data-fsheet="${esc(f.fn)}">📄 Pickup sheet</button>` : ""}${j.status === "open" ? `<button class="btn primary sm" data-fstart="${esc(f.fn)}">Start pickup →</button>` : ""}`;
+  } else if (f.stage === "photos") {
+    info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b>${(a?.vin || j?.vin) ? ` · <span class="mono small">${esc(a?.vin || j?.vin)}</span>` : ""}</div>`;
+    acts = a ? `<button class="btn primary sm" data-fopen="${a.id}">📷 Add photos →</button>` : `<button class="btn primary sm" data-fstart="${esc(f.fn)}">📷 Take photos →</button>`;
+  } else {
+    const miss = f.stage === "finish" ? fileMissing(f) : [];
+    const n = (a?.photo_paths || []).length;
+    info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b> · 📷 ${n}${a?.invoice_path ? " · 🧾 invoice" : ""}${a?.paid ? ` · <b>${money(a.amount)}</b> ${esc(PAY_LABEL[a.payment_type] || "")}` : a ? " · no payment" : ""}</div>
+      ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
+      ${f.stage === "done" && f.done ? `<div class="fline muted">Submitted ${esc(f.done)}</div>` : ""}
+      ${a?.driver_id ? `<div class="fline muted">👤 ${esc(driverName(a.driver_id))}</div>` : ""}`;
+    acts = a ? `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>` : `<span class="muted small">Done directly in Progi</span>`;
+  }
+  return `<article class="fcard ${st.cls}">
+    <div class="fhead"><b class="mono">${esc(f.fn)}</b><span class="fveh">${esc(f.veh || "—")}${a?.color ? ` <span class="muted">· ${esc(a.color)}</span>` : ""}</span></div>
+    <div class="fchips">${chips.join("")}</div>
+    ${info}
+    <div class="facts">${acts}</div>
+  </article>`;
+}
+async function renderBoard() {
+  const bf = (S.board ||= { stage: "all", q: "", limit: 60 });
+  shell(`${dashTabsHtml()}
+    <div class="board">
+      <div class="bpills" id="bPills">${STAGES.map(([k, l, c]) => `<button class="bpill ${c}" data-st="${k}"><span class="bl">${esc(l)}</span><b data-n="${k}">·</b></button>`).join("")}</div>
+      <p class="muted small bhint" id="bHint"></p>
+      <div class="bsearch"><input id="bQ" type="search" placeholder="Search file #, car, VIN, shop…"><button class="btn ghost sm" id="bRefresh" title="Refresh">↻</button></div>
+      <div id="bList" class="fgrid"><div class="muted">Loading…</div></div>
+    </div>`, { title: "Files" });
+  wireDashTabs();
+  $("#bQ").value = bf.q;
+  let files = [];
+  const load = async () => {
+    try { if (!S.drivers.length) await loadDrivers(); files = await loadFiles(); }
+    catch (e) { $("#bList").innerHTML = `<div class="empty">Couldn't load: ${esc(e.message)}</div>`; return; }
+    draw();
+  };
+  const order = { topick: 0, photos: 1, finish: 2, queue: 3, done: 4 };
+  const draw = () => {
+    const words = normSearch(bf.q);
+    const match = (f) => !words.length || words.every((w) => f.search.includes(w));
+    const counts = {}; let active = 0;
+    for (const f of files) if (match(f)) { counts[f.stage] = (counts[f.stage] || 0) + 1; if (f.stage !== "done") active++; }
+    $$("#bPills [data-n]").forEach((b) => (b.textContent = b.dataset.n === "all" ? active : counts[b.dataset.n] || 0));
+    $$("#bPills .bpill").forEach((b) => b.classList.toggle("on", b.dataset.st === bf.stage));
+    $("#bHint").textContent = STAGES.find(([k]) => k === bf.stage)?.[3] || "";
+    let rows = files.filter((f) => match(f) && (bf.stage === "all" ? f.stage !== "done" : f.stage === bf.stage));
+    const by = (f) => f.stage === "topick" ? (f.job?.status === "hold" ? "9" : "") + (f.job?.due_date || "9999") : f.stage === "done" ? "" : (f.picked || "9999");
+    rows.sort((x, y) => bf.stage === "all" ? (order[x.stage] - order[y.stage]) || by(x).localeCompare(by(y)) : bf.stage === "done" ? (y.done || y.picked || "").localeCompare(x.done || x.picked || "") : by(x).localeCompare(by(y)));
+    const shown = rows.slice(0, bf.limit);
+    $("#bList").innerHTML = rows.length ? shown.map(fileCard).join("") + (rows.length > shown.length ? `<button class="btn ghost bmore" id="bMore">Show ${Math.min(60, rows.length - shown.length)} more of ${rows.length - shown.length}</button>` : "")
+      : `<div class="empty">${bf.q ? "Nothing matches your search." : bf.stage === "photos" ? "Every picked-up car has photos 👍" : bf.stage === "queue" ? "The Progi queue is empty." : "Nothing here."}</div>`;
+    $$("#bList [data-fopen]").forEach((b) => (b.onclick = () => go("detail", b.dataset.fopen)));
+    $$("#bList [data-fstart]").forEach((b) => (b.onclick = () => go("form", b.dataset.fstart)));
+    $$("#bList [data-fsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = "dash"; go("sheet", b.dataset.fsheet); }));
+    const more = $("#bMore"); if (more) more.onclick = () => { bf.limit += 60; draw(); };
+  };
+  $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); b.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" }); };
+  let t; $("#bQ").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { bf.q = e.target.value.trim(); bf.limit = 60; draw(); }, 200); };
+  $("#bRefresh").onclick = load;
+  await load();
+  autoSyncJobs().then((n) => { if (n && S.view === "dash" && S.dashTab === "board") load(); });
 }
 
 // ─────────────────────────────────────────────────────────────── Progi "to pick up" list
