@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.33.0";
+const VERSION = "1.34.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1932,7 +1932,7 @@ function fileMissing(f) {
 async function loadFiles() {
   const [jr, ar] = await Promise.all([
     sb.from("progi_jobs").select("file_number, status, pix_status, form_done, picked_date, year, make, model, vin, shop_name, shop_address, shop_city, shop_phone, due_date, est_total, ticket_token, assigned_driver, distance_km, dist_addr").in("status", ["open", "hold", "picked"]).limit(3000),
-    sb.from("pickups").select("id, file_number, year, make, model, vin, color, photo_paths, invoice_path, draft, paid, amount, payment_type, progi_status, progi_submitted_at, picked_up_at, recorded_at, driver_id, shop_name").order("recorded_at", { ascending: false }).limit(3000),
+    sb.from("pickups").select("id, file_number, year, make, model, vin, color, photo_paths, invoice_path, draft, paid, amount, payment_type, progi_status, progi_submitted_at, progi_note, picked_up_at, recorded_at, driver_id, shop_name").order("recorded_at", { ascending: false }).limit(3000),
   ]);
   if (jr.error) throw jr.error;
   if (ar.error) throw ar.error;
@@ -1987,6 +1987,7 @@ function fileCard(f) {
     const n = (a?.photo_paths || []).length;
     info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b> · 📷 ${n}${a?.invoice_path ? " · 🧾 invoice" : ""}${a?.paid ? ` · <b>${money(a.amount)}</b> ${esc(PAY_LABEL[a.payment_type] || "")}` : a ? " · no payment" : ""}</div>
       ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
+      ${a?.progi_note && f.stage !== "done" ? `<div class="fline missing">${esc(a.progi_note)}</div>` : f.stage === "queue" ? `<div class="fline muted">⏳ Being sent to Progi automatically…</div>` : ""}
       ${f.stage === "done" && f.done ? `<div class="fline muted">Submitted ${esc(f.done)}</div>` : ""}
       ${a?.driver_id ? `<div class="fline muted">👤 ${esc(driverName(a.driver_id))}</div>` : ""}`;
     const ready = f.stage === "finish" && !miss.length;
@@ -2651,6 +2652,7 @@ async function renderDetail(id) {
         <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
       </div>
+      ${p.progi_note && p.progi_status !== "submitted" ? `<p class="note warnbox">${esc(p.progi_note)}</p>` : ""}
       ${p.notes ? `<p class="note">${esc(p.notes)}</p>` : ""}
       ${condHtml(p)}
     </section>
