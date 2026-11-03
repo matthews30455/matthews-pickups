@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.26.0";
+const VERSION = "1.27.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -480,6 +480,8 @@ function updateNet() {
 }
 
 function go(view, arg) {
+  // owner: "Pickup sheet" opens Progi's own full sheet (with its Download PDF); drivers get the app's sheet without notes
+  if (view === "sheet" && isOwner() && !S.sheetInApp) return openProgiSheet(arg);
   S.view = view;
   document.body.dataset.view = view;
   window.scrollTo(0, 0);
@@ -2168,6 +2170,17 @@ async function renderJobs(target) {
 }
 
 /** pickup sheet from Progi's towing ticket — everything except the notes (fee approvals etc. stay in the office) */
+function openProgiSheet(fn) {
+  const w = window.open("", "_blank");
+  (async () => {
+    let { data: j } = await sb.from("progi_jobs").select("ticket_token").eq("file_number", fn).maybeSingle();
+    if (!j?.ticket_token) ({ data: j } = await sb.from("dropoffs").select("ticket_token").eq("file_number", fn).maybeSingle());
+    if (!j?.ticket_token) { w?.close(); return toast("No Progi pickup sheet for this file yet.", "err"); }
+    const url = PIX_SHEET + encodeURIComponent(j.ticket_token) + "?locale=en";
+    if (w) w.location = url; else location.href = url;
+  })().catch((e) => { w?.close(); toast(e.message, "err"); });
+}
+const PIX_SHEET = "https://pix.app.progi.com/towing-ticket/token/";
 async function renderSheet(fn) {
   const back = () => S.sheetBack === "detail" ? go("detail", S.sheetBackArg) : go(S.sheetBack || "jobs");
   const own = isOwner();
