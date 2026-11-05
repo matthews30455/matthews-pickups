@@ -80,16 +80,109 @@ export async function compressPhoto(file, maxSide = 2048, quality = 0.85) {
 }
 
 /**
+ * Find the sheet of paper in a photo (bright, low-colour area not touching the photo edge).
+ * Returns its 4 corners [TL, TR, BR, BL] in the canvas' pixels, or null when unsure (then nothing is cropped).
+ */
+export function findPaper(src) {
+  const [w, h] = fit(src.width, src.height, 360);
+  const t = canvasOf(w, h), tx = t.getContext("2d", { willReadFrequently: true });
+  tx.drawImage(src, 0, 0, w, h);
+  const d = tx.getImageData(0, 0, w, h).data, n = w * h;
+  const score = new Float32Array(n), hist = new Uint32Array(256);
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const r = d[j], g = d[j + 1], b = d[j + 2];
+    const s = Math.max(0, Math.min(255, (r + g + b) / 3 - 1.2 * (Math.max(r, g, b) - Math.min(r, g, b))));
+    score[i] = s; hist[s | 0]++;
+  }
+  // Otsu threshold: paper vs background
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sB = 0, wB = 0, best = 0, th = 128;
+  for (let i = 0; i < 256; i++) {
+    wB += hist[i]; if (!wB) continue; const wF = n - wB; if (!wF) break;
+    sB += i * hist[i]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) ** 2;
+    if (v > best) { best = v; th = i; }
+  }
+  const paper = new Uint8Array(n); for (let i = 0; i < n; i++) paper[i] = score[i] > th ? 1 : 0;
+  // background = dark area connected to the photo edge; everything else (paper + the text on it) is the sheet
+  const bg = new Uint8Array(n), stack = [];
+  const push = (i) => { if (!bg[i] && !paper[i]) { bg[i] = 1; stack.push(i); } };
+  for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  while (stack.length) { const i = stack.pop(), x = i % w, y = (i / w) | 0;
+    if (x > 0) push(i - 1); if (x < w - 1) push(i + 1); if (y > 0) push(i - w); if (y < h - 1) push(i + w); }
+  // biggest connected sheet
+  const lab = new Int32Array(n); let bestLab = 0, bestN = 0, cur = 0;
+  for (let s0 = 0; s0 < n; s0++) {
+    if (bg[s0] || lab[s0]) continue;
+    cur++; let cnt = 0; lab[s0] = cur; stack.push(s0);
+    while (stack.length) { const i = stack.pop(); cnt++; const x = i % w, y = (i / w) | 0;
+      for (const k of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1])
+        if (k >= 0 && !bg[k] && !lab[k]) { lab[k] = cur; stack.push(k); } }
+    if (cnt > bestN) { bestN = cnt; bestLab = cur; }
+  }
+  if (bestN < n * 0.2 || bestN > n * 0.97) return null;           // no clear sheet, or the sheet fills the photo already
+  let tl = [0, 0, Infinity], tr = [0, 0, -Infinity], br = [0, 0, -Infinity], bl = [0, 0, Infinity];
+  for (let i = 0; i < n; i++) if (lab[i] === bestLab) {
+    const x = i % w, y = (i / w) | 0;
+    if (x + y < tl[2]) tl = [x, y, x + y]; if (x + y > br[2]) br = [x, y, x + y];
+    if (x - y > tr[2]) tr = [x, y, x - y]; if (x - y < bl[2]) bl = [x, y, x - y];
+  }
+  const q = [tl, tr, br, bl].map(([x, y]) => [x, y]);
+  // sanity: a real quadrilateral that covers most of the sheet's pixels
+  let area = 0; for (let i = 0; i < 4; i++) { const [x1, y1] = q[i], [x2, y2] = q[(i + 1) % 4]; area += x1 * y2 - x2 * y1; }
+  area = Math.abs(area) / 2;
+  if (area < bestN * 0.85 || area > bestN * 1.25 || area > n * 0.97) return null;
+  const s = src.width / w;
+  return q.map(([x, y]) => [x * s, y * s]);
+}
+
+/** Cut the sheet out of the photo and make it a straight rectangle (perspective correction). */
+export function warpPaper(src, q) {
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const W = Math.round((dist(q[0], q[1]) + dist(q[3], q[2])) / 2), H = Math.round((dist(q[0], q[3]) + dist(q[1], q[2])) / 2);
+  // unit square → quad (Heckbert)
+  const [[x0, y0], [x1, y1], [x2, y2], [x3, y3]] = q;
+  const dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3, dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
+  const den = dx1 * dy2 - dx2 * dy1;
+  const g = (dx3 * dy2 - dx2 * dy3) / den, hh = (dx1 * dy3 - dx3 * dy1) / den;
+  const a = x1 - x0 + g * x1, b = x3 - x0 + hh * x3, c = x0, d = y1 - y0 + g * y1, e = y3 - y0 + hh * y3, f = y0;
+  const sd = src.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, src.width, src.height).data, sw = src.width, shh = src.height;
+  const out = canvasOf(W, H), ox = out.getContext("2d"), od = ox.createImageData(W, H), o = od.data;
+  for (let y = 0; y < H; y++) {
+    const v = (y + 0.5) / H;
+    for (let x = 0; x < W; x++) {
+      const u = (x + 0.5) / W, z = g * u + hh * v + 1;
+      const sx = Math.min(sw - 2, Math.max(0, (a * u + b * v + c) / z)), sy = Math.min(shh - 2, Math.max(0, (d * u + e * v + f) / z));
+      const ix = sx | 0, iy = sy | 0, fx = sx - ix, fy = sy - iy, p = (iy * sw + ix) * 4, k = (y * W + x) * 4;
+      for (let ch = 0; ch < 3; ch++)
+        o[k + ch] = (sd[p + ch] * (1 - fx) + sd[p + 4 + ch] * fx) * (1 - fy) + (sd[p + sw * 4 + ch] * (1 - fx) + sd[p + sw * 4 + 4 + ch] * fx) * fy;
+      o[k + 3] = 255;
+    }
+  }
+  ox.putImageData(od, 0, 0);
+  return out;
+}
+/** Photo canvas → just the sheet (or unchanged when no clear sheet is found). */
+export function cropToPaper(c) {
+  try { const q = findPaper(c); return q ? warpPaper(c, q) : c; } catch (e) { console.warn("crop", e); return c; }
+}
+
+/**
  * Invoice photo → clean black-and-white "scan".
  * Removes shadows by dividing by an estimate of the paper brightness, then stretches contrast.
  * Returns a canvas (grayscale) the caller can rotate / encode.
  */
 export async function scanInvoice(file, maxSide = 2600) {
   const img = await loadImage(file);
-  const [w, h] = fit(img.naturalWidth, img.naturalHeight, maxSide);
-  const c = canvasOf(w, h);
+  const [w0, h0] = fit(img.naturalWidth, img.naturalHeight, maxSide);
+  const photo = canvasOf(w0, h0);
+  photo.getContext("2d").drawImage(img, 0, 0, w0, h0);
+  return scanCanvas(cropToPaper(photo));
+}
+/** Canvas (photo or rendered PDF page) → clean black-and-white scan. */
+export function scanCanvas(c) {
+  const w = c.width, h = c.height;
   const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, w, h);
   const id = ctx.getImageData(0, 0, w, h);
   const px = id.data;
 
