@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.36.0";
+const VERSION = "1.37.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1063,7 +1063,9 @@ function renderForm(existing, opts = {}) {
   const renderExistingInv = () => {
     const box = $("#invExisting");
     if (!edit || !existing.invoice_path || pages.length || pdfFile) { box.innerHTML = ""; return; }
-    box.innerHTML = `<div class="hint ok">✓ Invoice on file${existing.invoice_pages ? ` (${existing.invoice_pages} page${existing.invoice_pages > 1 ? "s" : ""})` : ""}. Scan again to replace it.</div>`;
+    box.innerHTML = `<div class="hint ok">✓ Invoice on file${existing.invoice_pages ? ` (${existing.invoice_pages} page${existing.invoice_pages > 1 ? "s" : ""})` : ""}. Scan again to replace it.
+      <button type="button" class="btn ghost sm" data-openinv>📄 Open</button></div>`;
+    box.querySelector("[data-openinv]").onclick = () => openPdf(() => signedUrl(existing.invoice_path));
   };
   renderExistingInv();
   if (edit && existing.invoice_purged_at && !existing.invoice_path) $("#invExisting").innerHTML = `<div class="hint">Invoice file was auto-deleted ${fmtShort.format(new Date(existing.invoice_purged_at))}.</div>`;
@@ -1071,15 +1073,19 @@ function renderForm(existing, opts = {}) {
   // invoice: scanning
   const renderPages = () => {
     $("#pages").innerHTML = pdfFile
-      ? `<div class="pdfchip">📄 ${esc(pdfFile.name)} <button type="button" class="x" data-rmpdf>×</button></div>`
-      : pages.map((p, i) => `<div class="page"><img src="${p.thumb}" alt="Page ${i + 1}"><span class="pg">${i + 1}</span>
-          <div class="pagebtns"><button type="button" data-rot="${i}" aria-label="Rotate">⟳</button><button type="button" data-rm="${i}" aria-label="Remove">×</button></div></div>`).join("");
+      ? `<div class="pdfchip"><button type="button" class="linkbtn" data-openpdf>📄 ${esc(pdfFile.name)}</button> <button type="button" class="x" data-rmpdf>×</button></div>`
+      : pages.map((p, i) => `<div class="page"><img src="${p.thumb}" alt="Page ${i + 1}" data-view="${i}"><span class="pg">${i + 1}</span>
+          <div class="pagebtns"><button type="button" data-rot="${i}" aria-label="Rotate">⟳</button><button type="button" data-rm="${i}" aria-label="Remove">×</button></div></div>`).join("")
+        + (pages.length ? `<div class="btnrow scanview"><button type="button" class="btn ghost sm" data-view="0">👁 View scan</button><button type="button" class="btn ghost sm" data-openpdf>📄 Open PDF</button></div>` : "");
     $("#scanLbl").textContent = pages.length ? "Add page" : "Scan Invoice";
     renderExistingInv();
   };
   $("#pages").onclick = (e) => {
     const rot = e.target.closest("[data-rot]"), rm = e.target.closest("[data-rm]");
     if (e.target.closest("[data-rmpdf]")) { pdfFile = null; renderPages(); return; }
+    const vw = e.target.closest("[data-view]");
+    if (vw) { viewScan(pages.map((p) => p.canvas), +vw.dataset.view); return; }
+    if (e.target.closest("[data-openpdf]")) { openPdf(() => pdfFile || buildPdf(pages.map((p) => p.canvas), "Invoice")); return; }
     if (rot) { const p = pages[+rot.dataset.rot]; p.rot = (p.rot + 1) % 4; p.canvas = rotateCanvas(p.src, p.rot); p.thumb = thumb(p.canvas); renderPages(); }
     if (rm) { pages.splice(+rm.dataset.rm, 1); renderPages(); }
   };
@@ -1795,8 +1801,13 @@ async function renderDropForm(id) {
         if (/pdf/i.test(file.type) || /\.pdf$/i.test(file.name)) { pdfFile = file; pages = []; }
         else { pdfFile = null; pages.push(await scanInvoice(file)); }
       }
-      $("#dInvInfo").textContent = pdfFile ? `✓ PDF: ${pdfFile.name}` : `✓ ${pages.length} page${pages.length > 1 ? "s" : ""} scanned — will be saved as one PDF`;
+      $("#dInvInfo").innerHTML = (pdfFile ? `✓ PDF: ${esc(pdfFile.name)}` : `✓ ${pages.length} page${pages.length > 1 ? "s" : ""} scanned — will be saved as one PDF`)
+        + `<div class="btnrow scanview">${pdfFile ? "" : `<button type="button" class="btn ghost sm" data-view>👁 View scan</button>`}<button type="button" class="btn ghost sm" data-openpdf>📄 Open PDF</button></div>`;
     } catch (e) { $("#dInvInfo").textContent = "Could not read: " + e.message; }
+  };
+  $("#dInvInfo").onclick = (e) => {
+    if (e.target.closest("[data-view]")) viewScan(pages, 0);
+    else if (e.target.closest("[data-openpdf]")) openPdf(() => pdfFile || buildPdf(pages, d.file_number));
   };
   $("#dCam").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
   $("#dGal").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
@@ -2834,6 +2845,20 @@ async function renderDrivers() {
 // ─────────────────────────────────────────────────────────────── start
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("./sw.js").catch(() => {});
 boot();
+
+// ---- invoice scan preview: see exactly the pages that go into the PDF, or open the PDF itself
+function viewScan(canvases, start = 0) {
+  if (!canvases.length) return;
+  openViewer(canvases.map((c) => c.toDataURL("image/jpeg", 0.85)), Math.min(start, canvases.length - 1));
+}
+async function openPdf(make) {
+  const w = window.open("", "_blank");                      // open now (inside the tap), fill in when the PDF is ready
+  try {
+    const b = await make();
+    const u = typeof b === "string" ? b : URL.createObjectURL(b);
+    if (w) w.location = u; else location.href = u;
+  } catch (e) { w?.close(); toast(e.message || "Could not open the PDF", "err"); }
+}
 
 // ---- photo viewer: click any photo thumbnail to see it large (← → to move, Esc / click to close)
 function openViewer(imgs, start) {
