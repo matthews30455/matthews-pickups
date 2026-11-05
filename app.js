@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.37.0";
+const VERSION = "1.38.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -705,6 +705,7 @@ function renderForm(existing, opts = {}) {
   let pdfFile = null;     // a PDF the driver picked instead of scanning
   const photos = [];      // {blob, url}
   let removePhotos = new Set(); // existing paths to remove (owner/driver edit)
+  let removeInvoice = false;    // the invoice already on file is deleted when saving
 
   const target = opts.mount || null;
   const html = `
@@ -1063,9 +1064,16 @@ function renderForm(existing, opts = {}) {
   const renderExistingInv = () => {
     const box = $("#invExisting");
     if (!edit || !existing.invoice_path || pages.length || pdfFile) { box.innerHTML = ""; return; }
+    if (removeInvoice) {
+      box.innerHTML = `<div class="hint warnbox">🗑 The invoice on file will be deleted when you save.
+        <button type="button" class="btn ghost sm" data-undoinv>Undo</button></div>`;
+      box.querySelector("[data-undoinv]").onclick = () => { removeInvoice = false; renderExistingInv(); };
+      return;
+    }
     box.innerHTML = `<div class="hint ok">✓ Invoice on file${existing.invoice_pages ? ` (${existing.invoice_pages} page${existing.invoice_pages > 1 ? "s" : ""})` : ""}. Scan again to replace it.
-      <button type="button" class="btn ghost sm" data-openinv>📄 Open</button></div>`;
+      <button type="button" class="btn ghost sm" data-openinv>📄 Open</button> <button type="button" class="btn ghost sm" data-delinv>🗑 Delete</button></div>`;
     box.querySelector("[data-openinv]").onclick = () => openPdf(() => signedUrl(existing.invoice_path));
+    box.querySelector("[data-delinv]").onclick = () => { removeInvoice = true; renderExistingInv(); };
   };
   renderExistingInv();
   if (edit && existing.invoice_purged_at && !existing.invoice_path) $("#invExisting").innerHTML = `<div class="hint">Invoice file was auto-deleted ${fmtShort.format(new Date(existing.invoice_purged_at))}.</div>`;
@@ -1191,7 +1199,7 @@ function renderForm(existing, opts = {}) {
     if (f.paid) {
       if (!(+f.amount > 0)) errs.push(["amount", "Enter the amount paid"]);
       if (!f.payment_type) errs.push(["payment_type", "Pick a payment type"]);
-      const hasInv = pages.length || pdfFile || (edit && existing.invoice_path);
+      const hasInv = pages.length || pdfFile || (edit && existing.invoice_path && !removeInvoice);
       if (!hasInv && !edit) errs.push(["scanIn", "Scan the shop invoice"]);
     }
     if (f.card_last4 && !/^\d{4}$/.test(f.card_last4)) errs.push(["card_last4", "Card: exactly 4 digits"]);
@@ -1284,6 +1292,8 @@ function renderForm(existing, opts = {}) {
         const { error } = await sb.storage.from(BUCKET).upload(path, invoiceBlob, { contentType: "application/pdf", upsert: true });
         if (error) throw error;
         row.invoice_path = path; row.invoice_pages = invoicePages;
+      } else if (removeInvoice && existing.invoice_path) {
+        row.invoice_path = null; row.invoice_pages = null;
       }
       let paths = (existing.photo_paths || []).filter((p) => !removePhotos.has(p));
       for (let i = 0; i < photos.length; i++) {
@@ -1297,6 +1307,22 @@ function renderForm(existing, opts = {}) {
       if (error) throw error;
       if (!data?.length) throw new Error(isOwner() ? "Not saved" : "Can only edit today's pickups");
       if (removePhotos.size && isOwner()) await sb.storage.from(BUCKET).remove([...removePhotos]);
+      if (row.invoice_path === null && existing.invoice_path) await sb.storage.from(BUCKET).remove([existing.invoice_path]);
+      // already in Progi: put the new invoice there too and take the old one out (owner only)
+      const inProgi = existing.progi_status === "submitted" || existing.progi_status === "done";
+      if (invoiceBlob && inProgi && isOwner() && !send) {
+        toast("Saved ✓ — replacing the invoice in Progi…", "ok");
+        try {
+          const { data: ss } = await sb.auth.getSession();
+          const r = await fetch(SYNC_FN, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + ss.session.access_token },
+            body: JSON.stringify({ action: "replaceinvoice", file_number: existing.file_number }) });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || j.error) throw new Error(j.error || "Progi " + r.status);
+          toast(`Invoice replaced in Progi ✓${j.removed ? ` (old one removed)` : ""}`, "ok");
+        } catch (e2) { toast("Saved in the app, but Progi still has the old invoice: " + e2.message, "err"); }
+      } else if (row.invoice_path === null && inProgi) {
+        toast("Deleted in the app — Progi still has its copy", "err");
+      } else
       toast(send ? "Saved ✓ — sent to the Progi queue" : "Saved ✓", "ok");
       opts.onSaved ? opts.onSaved() : go(isOwner() ? "dash" : "home");
     } catch (err) {
@@ -1769,7 +1795,7 @@ async function renderDropForm(id) {
           <div class="chips" data-chips="payment_type">${PAY_TYPES.map(([v, l]) => `<button type="button" data-val="${v}">${l}</button>`).join("")}</div></div>
         <label class="field" id="dCheque"><span>Cheque #</span><input name="cheque_number" inputmode="numeric" maxlength="20" value="${esc(f.cheque_number)}"></label>
         <div class="field"><span>Shop invoice ${d.invoice_path ? "" : "*"}</span>
-          ${d.invoice_path ? `<div class="btnrow"><button type="button" class="btn ghost sm" id="dInvOpen">📄 Open current invoice</button><span class="muted small">Add a new one below to replace it</span></div>` : ""}
+          ${d.invoice_path ? `<div class="btnrow" id="dInvCur"><button type="button" class="btn ghost sm" id="dInvOpen">📄 Open current invoice</button><button type="button" class="btn ghost sm" id="dInvDel">🗑 Delete</button><span class="muted small">Add a new one below to replace it</span></div>` : ""}
           <div class="btnrow"><label class="btn filebtn">📷 Scan invoice<input type="file" accept="image/*" capture="environment" id="dCam" hidden></label>
             <label class="btn ghost filebtn">Photo / PDF file<input type="file" accept="image/*,.heic,.heif,application/pdf" multiple id="dGal" hidden></label></div>
           <div id="dInvInfo" class="muted small"></div></div>
@@ -1794,6 +1820,19 @@ async function renderDropForm(id) {
   });
   paint();
   if ($("#dInvOpen")) $("#dInvOpen").onclick = async () => { const w = window.open("", "_blank"); try { const u = await signedUrl(d.invoice_path); if (w) w.location = u; else location.href = u; } catch (e) { w?.close(); toast(e.message, "err"); } };
+  let delInv = false;
+  const paintDel = () => {
+    const box = $("#dInvCur"); if (!box) return;
+    box.innerHTML = delInv
+      ? `<span class="small warnc">🗑 The current invoice will be deleted when you save.</span><button type="button" class="btn ghost sm" id="dInvUndo">Undo</button>`
+      : `<button type="button" class="btn ghost sm" id="dInvOpen">📄 Open current invoice</button><button type="button" class="btn ghost sm" id="dInvDel">🗑 Delete</button><span class="muted small">Add a new one below to replace it</span>`;
+    if (delInv) $("#dInvUndo").onclick = () => { delInv = false; paintDel(); };
+    else {
+      $("#dInvDel").onclick = () => { delInv = true; paintDel(); };
+      $("#dInvOpen").onclick = () => openPdf(() => signedUrl(d.invoice_path));
+    }
+  };
+  if ($("#dInvDel")) $("#dInvDel").onclick = () => { delInv = true; paintDel(); };
   const addFiles = async (files) => {
     $("#dInvInfo").textContent = "Reading…";
     try {
@@ -1831,7 +1870,7 @@ async function renderDropForm(id) {
       if (row.paid == null) errs.push("Paid the shop? Tap Yes or No");
       if (row.paid && !(row.amount > 0)) errs.push("Enter the amount");
       if (row.paid && !row.payment_type) errs.push("Pick the payment type");
-      if (row.paid && !d.invoice_path && !pages.length && !pdfFile) errs.push("Add the shop invoice");
+      if (row.paid && (!d.invoice_path || delInv) && !pages.length && !pdfFile) errs.push("Add the shop invoice");
     }
     if (errs.length) { $("#dErr").textContent = errs.join(" · "); return; }
     $("#dErr").textContent = "";
@@ -1843,12 +1882,17 @@ async function renderDropForm(id) {
         const { error: ue } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: "application/pdf", upsert: true });
         if (ue) throw ue;
         row.invoice_path = path;
+      } else if (delInv && d.invoice_path) {
+        const { error: de } = await sb.storage.from(BUCKET).remove([d.invoice_path]);
+        if (de) throw de;
+        row.invoice_path = null;
       }
       if (!d.driver_id) row.driver_id = S.user.id;
       if (send) { row.app_status = "queued"; row.progi_note = null; }
       const { error: e2 } = await sb.from("dropoffs").update(row).eq("id", d.id);
       if (e2) throw e2;
-      toast(send ? "Saved ✓ — sending to Progi automatically" : "Saved ✓", "ok");
+      const replaced = (pages.length || pdfFile || delInv) && d.app_status === "done" && !send;
+      toast(replaced ? "Saved in the app ✓ — this file is already in Progi; ask Claude to swap the invoice there" : send ? "Saved ✓ — sending to Progi automatically" : "Saved ✓", replaced ? "err" : "ok");
       back();
     } catch (err) { $("#dErr").textContent = err.message || "Could not save"; btn.disabled = false; btn.textContent = send ? "📤 Save & send to Progi" : "💾 Save"; }
   };
