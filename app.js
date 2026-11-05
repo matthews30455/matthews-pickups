@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.34.0";
+const VERSION = "1.35.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1620,8 +1620,8 @@ const DSTAGES = [
   ["all", "All files", "st-grey", "Every open drop-off file"],
   ["topick", "To pick up", "st-amber", "Waiting for us to pick up and deliver"],
   ["record", "Dates & invoice", "st-red", "Delivered — enter pickup/drop-off date, payment and the shop invoice"],
-  ["send", "Invoice → Progi", "st-purple", "Shop invoice ready — needs to be uploaded to Progi"],
-  ["qb", "QuickBooks invoice", "st-blue", "Our flat-rate invoice still has to be made in QuickBooks and sent to Progi"],
+  ["send", "Sending → Progi", "st-purple", "In the queue: the server uploads the shop invoice + makes our QuickBooks invoice (MCZ…) and uploads it as Flat rate"],
+  ["qb", "QuickBooks invoice", "st-blue", "Older files: our flat-rate invoice is not in Progi yet — tap Send to Progi and the server does it"],
   ["done", "Done", "st-green", "Both invoices are in Progi"],
 ];
 const DSTAGE = Object.fromEntries(DSTAGES.map(([k, l, c]) => [k, { label: l, cls: c }]));
@@ -1632,6 +1632,7 @@ function dropStage(d) {
   if (!d.dropped_off_on && d.progi_status !== "Delivered") return "topick";
   const missing = !d.picked_up_on || !d.dropped_off_on || d.paid == null || (d.paid && (!d.invoice_path || !(+d.amount > 0)));
   if (missing) return old && !d.picked_up_on ? "done" : "record";          // old history from before the app: don't nag
+  if (d.app_status === "queued") return "send";
   if (d.paid && d.progi_invoice_docs === 0 && d.app_status !== "done") return "send";
   return "qb";
 }
@@ -1648,7 +1649,9 @@ function dropCard(d) {
   const st = DSTAGE[d.stage];
   const veh = [d.year, d.make, d.model].filter(Boolean).join(" ");
   const chips = [`<span class="schip ${st.cls}">${esc(st.label)}</span>`, `<span class="schip st-soft">→ ${esc(RECYCLER(d.recycler))}</span>`, kmChip(d.distance_km, d.dist_addr)];
-  if (d.stage === "send" && d.app_status === "queued") chips.push(`<span class="schip st-purple">📤 In queue</span>`);
+  if (d.stage === "send" && d.app_status === "queued" && !d.progi_note) chips.push(`<span class="schip st-purple">📤 In queue</span>`);
+  const note = d.stage === "done" ? "" : d.progi_note ? `<div class="fline missing">${esc(d.progi_note)}</div>`
+    : d.app_status === "queued" ? `<div class="fline muted">⏳ Being sent to Progi automatically…</div>` : "";
   const today = dayKey(new Date());
   if (d.stage === "topick" && d.due_date) chips.push(`<span class="schip ${d.due_date < today ? "st-red" : "st-soft"}">${d.due_date < today ? "Late · " : ""}Due ${esc(d.due_date)}</span>`);
   const addr = [d.pickup_address, d.pickup_city].filter(Boolean).join(", ");
@@ -1663,9 +1666,12 @@ function dropCard(d) {
     ${d.stage === "topick" && d.pickup_phone ? `<div class="fline muted"><a href="tel:${esc(String(d.pickup_phone).replace(/[^\d+]/g, ""))}">${esc(fmtPhone(d.pickup_phone))}</a></div>` : ""}
     ${dates || pay ? `<div class="fline">${[dates, pay].filter(Boolean).join(" · ")}</div>` : ""}
     ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
-    ${d.stage === "qb" ? `<div class="fline muted">Shop invoice ${d.progi_invoice_docs ? "✓ in Progi" : d.paid === false ? "not needed" : "—"} · QuickBooks invoice ✗</div>` : ""}
+    ${d.stage === "qb" ? `<div class="fline muted">Shop invoice ${d.progi_invoice_docs ? "✓ in Progi" : d.paid === false ? "not needed" : "—"} · Flat-rate invoice ✗</div>` : ""}
+    ${note}
+    ${d.stage === "done" && d.qbo_doc ? `<div class="fline muted">QuickBooks ${esc(d.qbo_doc)} ✓ · Flat rate in Progi ✓</div>` : ""}
     <div class="facts">${d.ticket_token ? `<button class="btn ghost sm" data-dsheet="${esc(d.file_number)}">📄 Pickup sheet</button>` : ""}
-      ${d.stage === "qb" && isOwner() ? `<button class="btn ghost sm" data-dqb="${d.id}">✓ QuickBooks done</button>` : ""}
+      ${["qb", "send"].includes(d.stage) && isOwner() && (d.app_status !== "queued" || d.progi_note) ? `<button class="btn primary sm" data-dsend="${d.id}">📤 Send to Progi</button>` : ""}
+      ${d.stage === "qb" && isOwner() ? `<button class="btn ghost sm" data-dqb="${d.id}">✓ Already done</button>` : ""}
       <button class="btn ${["topick", "record"].includes(d.stage) ? "primary" : "ghost"} sm" data-dopen="${d.id}">${d.stage === "topick" ? "Record pickup →" : d.stage === "record" ? "Enter dates & invoice →" : "Open"}</button></div>
   </article>`;
 }
@@ -1715,6 +1721,13 @@ async function renderDrop() {
       const d = rows.find((x) => x.id === b.dataset.dqb); if (d) { d.qb_status = "done"; d.stage = dropStage(d); }
       toast("Marked done ✓", "ok"); draw();
     }));
+    $$("#bList [data-dsend]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      const { error } = await sb.from("dropoffs").update({ app_status: "queued", progi_note: null, updated_at: new Date().toISOString() }).eq("id", b.dataset.dsend);
+      if (error) { b.disabled = false; return toast(error.message, "err"); }
+      const d = rows.find((x) => x.id === b.dataset.dsend); if (d) { d.app_status = "queued"; d.progi_note = null; d.stage = dropStage(d); }
+      toast("Queued — the server sends it to Progi now", "ok"); draw();
+    }));
     const more = $("#bMore"); if (more) more.onclick = () => { bf.limit += 60; draw(); };
   };
   $("#bPills").onclick = (e) => { const b = e.target.closest("[data-st]"); if (!b) return; bf.stage = b.dataset.st; bf.limit = 60; draw(); };
@@ -1758,15 +1771,15 @@ async function renderDropForm(id) {
       <label class="field"><span>Notes</span><textarea name="notes" rows="2">${esc(f.notes)}</textarea></label>
       ${d.instructions && isOwner() ? `<p class="muted small"><b>Progi instructions:</b> ${esc(d.instructions)}</p>` : ""}
       <p class="err-text" id="dErr"></p>
-      <div class="savebar">${d.app_status === "done" || d.progi_invoice_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send invoice to Progi" : "Done — send to the office"}</button>`}
-        <button class="btn ${d.app_status === "done" || d.progi_invoice_docs ? "primary big" : ""}" type="submit" id="dSave">💾 Save</button></div>
+      ${d.progi_note ? `<div class="note warnbox">${esc(d.progi_note)}</div>` : d.app_status === "queued" ? `<p class="muted small">⏳ Being sent to Progi automatically…</p>` : ""}
+      <div class="savebar">${d.app_status === "done" || d.progi_flat_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send to Progi" : "Done — send to Progi"}</button>`}
+        <button class="btn ${d.app_status === "done" || d.progi_flat_docs ? "primary big" : ""}" type="submit" id="dSave">💾 Save</button></div>
     </form>`, { title: d.file_number, back });
   const form = $("#dForm");
   const paint = () => {
     $$("[data-chips]", form).forEach((g) => { const k = g.dataset.chips; $$("button", g).forEach((b) => { const on = String(f[k]) === b.dataset.val; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); }); });
     $("#dPaid").hidden = f.paid !== true;
     $("#dCheque").hidden = f.payment_type !== "cheque";
-    const sendB = $("#dSend"); if (sendB) sendB.hidden = f.paid === false;
   };
   form.addEventListener("click", (e) => {
     const b = e.target.closest("[data-chips] button"); if (!b) return;
@@ -1821,13 +1834,12 @@ async function renderDropForm(id) {
         row.invoice_path = path;
       }
       if (!d.driver_id) row.driver_id = S.user.id;
-      if (send) row.app_status = "queued";
-      if (row.paid === false && row.picked_up_on && row.dropped_off_on && d.app_status === "todo") row.app_status = "done";   // nothing to send
+      if (send) { row.app_status = "queued"; row.progi_note = null; }
       const { error: e2 } = await sb.from("dropoffs").update(row).eq("id", d.id);
       if (e2) throw e2;
-      toast(send ? "Saved ✓ — invoice queued for Progi" : "Saved ✓", "ok");
+      toast(send ? "Saved ✓ — sending to Progi automatically" : "Saved ✓", "ok");
       back();
-    } catch (err) { $("#dErr").textContent = err.message || "Could not save"; btn.disabled = false; btn.textContent = send ? "📤 Save & send invoice to Progi" : "💾 Save"; }
+    } catch (err) { $("#dErr").textContent = err.message || "Could not save"; btn.disabled = false; btn.textContent = send ? "📤 Save & send to Progi" : "💾 Save"; }
   };
 }
 
