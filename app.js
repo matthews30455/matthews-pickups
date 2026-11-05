@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.38.0";
+const VERSION = "1.39.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1778,6 +1778,7 @@ async function renderDropForm(id) {
   const f = { picked_up_on: d.picked_up_on || d.progi_pickup_date || dayKey(new Date()), dropped_off_on: d.dropped_off_on || d.picked_up_on || d.progi_pickup_date || dayKey(new Date()),
     paid: d.paid, amount: d.amount ?? "", hst_included: d.hst_included ?? true, payment_type: d.payment_type || "", cheque_number: d.cheque_number || "", notes: d.notes || "" };
   let pages = [], pdfFile = null;
+  const sentBefore = d.app_status === "done" || d.progi_flat_docs > 0 || d.progi_invoice_docs > 0;
   shell(`<form class="card stack" id="dForm" novalidate>
       <div><b class="mono big">${esc(d.file_number)}</b> <span class="muted">${esc(veh)}</span>
         <div class="muted small">${kmChip(d.distance_km, d.dist_addr)} ${esc(d.pickup_name || "")}${d.pickup_city ? " · " + esc(d.pickup_city) : ""} → ${esc(RECYCLER(d.recycler))}${d.vin ? ` · <span class="mono">${esc(d.vin)}</span>` : ""}</div></div>
@@ -1804,8 +1805,9 @@ async function renderDropForm(id) {
       ${d.instructions && isOwner() ? `<p class="muted small"><b>Progi instructions:</b> ${esc(d.instructions)}</p>` : ""}
       <p class="err-text" id="dErr"></p>
       ${d.progi_note ? `<div class="note warnbox">${esc(d.progi_note)}</div>` : d.app_status === "queued" ? `<p class="muted small">⏳ Being sent to Progi automatically…</p>` : ""}
-      <div class="savebar">${d.app_status === "done" || d.progi_flat_docs ? "" : `<button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send to Progi" : "Done — send to Progi"}</button>`}
-        <button class="btn ${d.app_status === "done" || d.progi_flat_docs ? "primary big" : ""}" type="submit" id="dSave">💾 Save</button></div>
+      <div class="savebar"><button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send to Progi" : "Done — send to Progi"}</button>
+        ${sentBefore && isOwner() ? "" : `<button class="btn" type="submit" id="dSave">💾 Save</button>`}</div>
+      ${sentBefore && isOwner() ? `<p class="muted small">Already sent to Progi before — saving sends whatever Progi is still missing (e.g. the shop invoice).</p>` : ""}
     </form>`, { title: d.file_number, back });
   const form = $("#dForm");
   const paint = () => {
@@ -1855,7 +1857,7 @@ async function renderDropForm(id) {
   $("#dSend") && ($("#dSend").onclick = () => { sendAfter = true; form.requestSubmit(); });
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const send = sendAfter; sendAfter = false;
+    const send = sendAfter || (sentBefore && isOwner()); sendAfter = false;   // a file already in Progi: every save goes to Progi again
     const fd = new FormData(form);
     const row = { picked_up_on: fd.get("picked_up_on") || null, dropped_off_on: fd.get("dropped_off_on") || null, paid: f.paid,
       amount: f.paid ? Math.round(+String(fd.get("amount") || "").replace(/[^\d.]/g, "") * 100) / 100 || null : null,
@@ -1891,8 +1893,7 @@ async function renderDropForm(id) {
       if (send) { row.app_status = "queued"; row.progi_note = null; }
       const { error: e2 } = await sb.from("dropoffs").update(row).eq("id", d.id);
       if (e2) throw e2;
-      const replaced = (pages.length || pdfFile || delInv) && d.app_status === "done" && !send;
-      toast(replaced ? "Saved in the app ✓ — this file is already in Progi; ask Claude to swap the invoice there" : send ? "Saved ✓ — sending to Progi automatically" : "Saved ✓", replaced ? "err" : "ok");
+      toast(send ? "Saved ✓ — sending to Progi automatically" : "Saved ✓", "ok");
       back();
     } catch (err) { $("#dErr").textContent = err.message || "Could not save"; btn.disabled = false; btn.textContent = send ? "📤 Save & send to Progi" : "💾 Save"; }
   };
