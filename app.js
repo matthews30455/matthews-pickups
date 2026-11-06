@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.40.0";
+const VERSION = "1.40.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -2078,7 +2078,7 @@ function isAmtWarn(p) {
 }
 async function sendAnyway(p) {
   if (!confirm(`${p.progi_note}\n\nThe amount does not match what Progi approved.\nSend it to Progi anyway with the amount we paid?`)) return false;
-  const { error } = await sb.from("pickups").update({ progi_status: "queued", progi_note: "✓ Send anyway — sending with the amount we paid" }).eq("id", p.id);
+  const { error } = await sb.from("pickups").update({ accept_amount: true, progi_status: "queued" }).eq("id", p.id);
   if (error) { toast(error.message, "err"); return false; }
   toast("Sending to Progi with our amount ✓", "ok");
   return true;
