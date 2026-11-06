@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.39.0";
+const VERSION = "1.40.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -2055,7 +2055,7 @@ function fileCard(f) {
     const n = (a?.photo_paths || []).length;
     info = `<div class="fline">Picked up <b>${esc(f.picked || "—")}</b> · 📷 ${n}${a?.invoice_path ? " · 🧾 invoice" : ""}${a?.paid ? ` · <b>${money(a.amount)}</b> ${esc(PAY_LABEL[a.payment_type] || "")}` : a ? " · no payment" : ""}</div>
       ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
-      ${a?.progi_note && f.stage !== "done" ? `<div class="fline missing">${esc(a.progi_note)}</div>` : f.stage === "queue" ? `<div class="fline muted">⏳ Being sent to Progi automatically…</div>` : ""}
+      ${a?.progi_note && f.stage !== "done" ? `<div class="fline missing">${esc(a.progi_note)}</div>${isAmtWarn(a) ? `<div class="fline"><button class="btn sm" data-fany="${a.id}">⚠ Send anyway</button></div>` : ""}` : f.stage === "queue" ? `<div class="fline muted">⏳ Being sent to Progi automatically…</div>` : ""}
       ${f.stage === "done" && f.done ? `<div class="fline muted">Submitted ${esc(f.done)}</div>` : ""}
       ${a?.driver_id ? `<div class="fline muted">👤 ${esc(driverName(a.driver_id))}</div>` : ""}`;
     const ready = f.stage === "finish" && !miss.length;
@@ -2071,6 +2071,17 @@ function fileCard(f) {
     ${info}
     <div class="facts">${acts}</div>
   </article>`;
+}
+// amount warning from the Progi auto-submit (paid / invoice ≠ what Progi approved) → owner can send anyway
+function isAmtWarn(p) {
+  return isOwner() && !!p?.progi_note && p.progi_status !== "submitted" && /^⚠ (Amount differs|Paid \$[\d.,]+ but Progi approved|Invoice total )/.test(p.progi_note);
+}
+async function sendAnyway(p) {
+  if (!confirm(`${p.progi_note}\n\nThe amount does not match what Progi approved.\nSend it to Progi anyway with the amount we paid?`)) return false;
+  const { error } = await sb.from("pickups").update({ progi_status: "queued", progi_note: "✓ Send anyway — sending with the amount we paid" }).eq("id", p.id);
+  if (error) { toast(error.message, "err"); return false; }
+  toast("Sending to Progi with our amount ✓", "ok");
+  return true;
 }
 async function renderBoard() {
   const bf = (S.board ||= { stage: "all", q: "", limit: 60 });
@@ -2116,6 +2127,11 @@ async function renderBoard() {
       if (error) { toast(error.message, "err"); b.disabled = false; b.textContent = "📤 Send to Progi"; return; }
       const f = files.find((x) => x.app?.id === b.dataset.fsend); if (f) { f.app.progi_status = "queued"; f.stage = "queue"; }
       toast("Sent to the Progi queue ✓", "ok"); draw();
+    }));
+    $$("#bList [data-fany]").forEach((b) => (b.onclick = async () => {
+      const f = files.find((x) => x.app?.id === b.dataset.fany);
+      if (!f || !(await sendAnyway(f.app))) return;
+      f.app.progi_status = "queued"; f.app.progi_note = null; f.stage = "queue"; draw();
     }));
     $$("#bList [data-fstart]").forEach((b) => (b.onclick = () => go("form", b.dataset.fstart)));
     $$("#bList [data-fsheet]").forEach((b) => (b.onclick = () => { S.sheetBack = "dash"; go("sheet", b.dataset.fsheet); }));
@@ -2720,7 +2736,7 @@ async function renderDetail(id) {
         <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
       </div>
-      ${p.progi_note && p.progi_status !== "submitted" ? `<p class="note warnbox">${esc(p.progi_note)}</p>` : ""}
+      ${p.progi_note && p.progi_status !== "submitted" ? `<p class="note warnbox">${esc(p.progi_note)}</p>${isOwner() && isAmtWarn(p) ? `<div class="btnrow"><button class="btn primary" id="sendAnyway">⚠ Amount differs — send to Progi anyway</button></div>` : ""}` : ""}
       ${p.notes ? `<p class="note">${esc(p.notes)}</p>` : ""}
       ${condHtml(p)}
     </section>
@@ -2770,6 +2786,8 @@ async function renderDetail(id) {
     $("#dlPdf").onclick = async () => { try { location.href = await signedUrl(p.invoice_path, `${p.file_number}.pdf`); } catch (e) { toast(e.message, "err"); } };
   }
   if (canEdit) renderForm(p, { mount: $("#editMount"), onSaved: () => go(isOwner() ? "dash" : "home") });
+  const sa = $("#sendAnyway");
+  if (sa) sa.onclick = async () => { if (await sendAnyway(p)) renderDetail(p.id); };
   const dq = $("#drvQueue");
   if (dq) dq.onclick = async () => {
     const v = dq.dataset.v;
