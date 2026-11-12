@@ -132,6 +132,21 @@ export function findPaper(src) {
   let area = 0; for (let i = 0; i < 4; i++) { const [x1, y1] = q[i], [x2, y2] = q[(i + 1) % 4]; area += x1 * y2 - x2 * y1; }
   area = Math.abs(area) / 2;
   if (area < bestN * 0.85 || area > bestN * 1.25 || area > n * 0.97) return null;
+  // the sheet runs off the photo (or merges with other white paper under it) → its real corners aren't visible: don't crop
+  let tT = 0, tB = 0, tL = 0, tR = 0;
+  for (let x = 0; x < w; x++) { if (lab[x] === bestLab) tT++; if (lab[(h - 1) * w + x] === bestLab) tB++; }
+  for (let y = 0; y < h; y++) { if (lab[y * w] === bestLab) tL++; if (lab[y * w + w - 1] === bestLab) tR++; }
+  if (tT > w * 0.08 || tB > w * 0.08 || tL > h * 0.08 || tR > h * 0.08) return null;
+  // must look like a sheet seen at an angle: opposite sides similar, corners near 90°
+  const L = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const top = L(q[0], q[1]), bot = L(q[3], q[2]), lef = L(q[0], q[3]), rig = L(q[1], q[2]);
+  if (Math.min(top, bot) / Math.max(top, bot) < 0.8 || Math.min(lef, rig) / Math.max(lef, rig) < 0.8) return null;
+  for (let i = 0; i < 4; i++) {
+    const p0 = q[(i + 3) % 4], p1 = q[i], p2 = q[(i + 1) % 4];
+    const ax = p0[0] - p1[0], ay = p0[1] - p1[1], bx = p2[0] - p1[0], by = p2[1] - p1[1];
+    const cos = (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1);
+    if (Math.abs(cos) > 0.34) return null;                         // corner further than ~20° from square
+  }
   const s = src.width / w;
   return q.map(([x, y]) => [x * s, y * s]);
 }
