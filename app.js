@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.40.2";
+const VERSION = "1.40.3";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -2074,13 +2074,13 @@ function fileCard(f) {
 }
 // amount warning from the Progi auto-submit (paid / invoice ≠ what Progi approved) → owner can send anyway
 function isAmtWarn(p) {
-  return isOwner() && !!p?.progi_note && p.progi_status !== "submitted" && /^⚠ (Amount differs|Paid \$[\d.,]+ but Progi approved|Invoice total )/.test(p.progi_note);
+  return isOwner() && !!p?.progi_note && p.progi_status !== "submitted" && /^⚠ (Amount differs|VIN differs|Paid \$[\d.,]+ but Progi approved|Invoice total )/.test(p.progi_note);
 }
 async function sendAnyway(p) {
-  if (!confirm(`${p.progi_note}\n\nThe amount does not match what Progi approved.\nSend it to Progi anyway with the amount we paid?`)) return false;
+  if (!confirm(`${p.progi_note}\n\nThis does not match Progi.\nSend it to Progi anyway (with the amount we paid)?`)) return false;
   const { error } = await sb.from("pickups").update({ accept_amount: true, progi_status: "queued" }).eq("id", p.id);
   if (error) { toast(error.message, "err"); return false; }
-  toast("Sending to Progi with our amount ✓", "ok");
+  toast("Sending to Progi ✓", "ok");
   return true;
 }
 async function renderBoard() {
@@ -2736,7 +2736,7 @@ async function renderDetail(id) {
         <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
       </div>
-      ${p.progi_note && p.progi_status !== "submitted" ? `<p class="note warnbox">${esc(p.progi_note)}</p>${isOwner() && isAmtWarn(p) ? `<div class="btnrow"><button class="btn primary" id="sendAnyway">⚠ Amount differs — send to Progi anyway</button></div>` : ""}` : ""}
+      ${p.progi_note && p.progi_status !== "submitted" ? `<p class="note warnbox">${esc(p.progi_note)}</p>${isOwner() && isAmtWarn(p) ? `<div class="btnrow"><button class="btn primary" id="sendAnyway">⚠ Doesn't match Progi — send anyway</button></div>` : ""}` : ""}
       ${p.notes ? `<p class="note">${esc(p.notes)}</p>` : ""}
       ${condHtml(p)}
     </section>
