@@ -1,6 +1,6 @@
 // Offline support: keeps the app shell and libraries on the phone.
 // Database / file traffic (supabase.co) is never cached.
-const CACHE = "mp-v1.40.3";
+const CACHE = "mp-v1.41.0";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./config.js", "./queue.js", "./scan.js",
   "./manifest.webmanifest", "./icon-192.png", "./logo.png", "./apple-touch-icon.png"];
 const LIBS = [

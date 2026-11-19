@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.40.3";
+const VERSION = "1.41.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -347,6 +347,8 @@ const S = {
   outboxCount: 0,
 };
 const isOwner = () => S.me?.role === "owner";
+const isManager = () => isOwner() || !!S.me?.can_manage;        // e.g. Amir: edits every driver's open files
+const maySend = (p) => isOwner() || !p || p.driver_id === S.user?.id;   // only the owner sends another driver's file
 
 // ─────────────────────────────────────────────────────────────── boot
 async function boot() {
@@ -662,7 +664,7 @@ const progiPill = (p) => p.progi_status === "submitted" ? `<span class="pill gre
  */
 function renderForm(existing, opts = {}) {
   const edit = !!existing;
-  const canSend = edit && !["queued", "submitted"].includes(existing.progi_status);
+  const canSend = edit && !["queued", "submitted"].includes(existing.progi_status) && maySend(existing);
   const f = {
     file_number: existing?.file_number || "",
     driver_id: existing?.driver_id || "",
@@ -2010,7 +2012,7 @@ async function loadFiles() {
     map.set(j.file_number, { fn: j.file_number, job: j, app: null });
   }
   for (const a of ar.data || []) { const f = map.get(a.file_number) || { fn: a.file_number, job: null, app: null }; if (!f.app) f.app = a; map.set(a.file_number, f); }
-  if (!isOwner()) {     // cars another driver already photographed (their file is not visible to this driver)
+  if (!isManager()) {     // cars another driver already photographed (their file is not visible to this driver)
     const { data: ys } = await sb.rpc("yard_status");
     for (const y of ys || []) {
       const f = map.get(y.file_number);
@@ -2061,7 +2063,8 @@ function fileCard(f) {
     const ready = f.stage === "finish" && !miss.length;
     acts = a?._other ? `<span class="muted small">Photos taken by another driver</span>`
       : !a ? `<span class="muted small">Done directly in Progi</span>`
-      : ready ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><button class="btn primary sm" data-fsend="${a.id}">📤 Send to Progi</button>`
+      : ready && maySend(a) ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><button class="btn primary sm" data-fsend="${a.id}">📤 Send to Progi</button>`
+      : ready ? `<button class="btn ghost sm" data-fopen="${a.id}">Open</button><span class="muted small">Ready · Ali sends it</span>`
       : `<button class="btn ${f.stage === "finish" ? "primary" : "ghost"} sm" data-fopen="${a.id}">${f.stage === "finish" ? "Finish file →" : "Open"}</button>`;
   }
   if (f.stage !== "topick" && j?.ticket_token) acts = `<button class="btn ghost sm" data-fsheet="${esc(f.fn)}">📄 Sheet</button>` + acts;
@@ -2723,7 +2726,7 @@ async function renderDetail(id) {
   if (error || !p) { $(".main").innerHTML = `<div class="empty">Not found${error ? ": " + esc(error.message) : ""}.</div>`; return; }
   if (isOwner() && !S.drivers.length) await loadDrivers();
   const dj = isOwner() ? (await sb.from("progi_jobs").select("distance_km, dist_addr").eq("file_number", p.file_number).maybeSingle()).data : null;
-  const canEdit = isOwner() || (p.driver_id === S.user.id && (isToday(p.recorded_at) || p.progi_status !== "submitted"));
+  const canEdit = isOwner() || (isManager() && p.progi_status !== "submitted") || (p.driver_id === S.user.id && (isToday(p.recorded_at) || p.progi_status !== "submitted"));
   const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
 
   shell(`
