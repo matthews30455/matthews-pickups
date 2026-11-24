@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.41.0";
+const VERSION = "1.42.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1273,6 +1273,15 @@ function renderForm(existing, opts = {}) {
       const invoicePages = pdfFile ? 1 : pages.length;
 
       if (!edit) {
+        // same file number already saved (on this phone or on the server) → never make a second copy
+        const fnU = row.file_number;
+        let dupMsg = (await outbox.all()).some((i) => (i.row.file_number || "").toUpperCase() === fnU)
+          ? `${fnU} is already saved on this phone and still sending — wait, then open it from the list to add photos.` : "";
+        if (!dupMsg && navigator.onLine) {
+          const { data } = await sb.rpc("file_number_check", { fn: fnU, exclude_id: null });
+          if (data?.[0]?.times) dupMsg = `${fnU} already exists — open it from the list and add the photos there.`;
+        }
+        if (dupMsg && !(isOwner() && confirm(dupMsg + "\n\nSave a second copy anyway?"))) throw new Error("⚠ " + dupMsg);
         const client_id = uuid();
         await outbox.put({
           client_id, uid: S.user.id, folder: row.driver_id || S.user.id, created: Date.now(),
@@ -1702,6 +1711,7 @@ function dropCard(d) {
     ${miss.length ? `<div class="fline missing">Missing: ${miss.map(esc).join(" · ")}</div>` : ""}
     ${d.stage === "qb" ? `<div class="fline muted">Shop invoice ${d.progi_invoice_docs ? "✓ in Progi" : d.paid === false ? "not needed" : "—"} · Flat-rate invoice ✗</div>` : ""}
     ${note}
+    ${isManager() && d.driver_id ? `<div class="fline muted">👤 ${esc(driverName(d.driver_id))}</div>` : ""}
     ${d.stage === "done" && d.qbo_doc ? `<div class="fline muted">QuickBooks ${esc(d.qbo_doc)} ✓ · Flat rate in Progi ✓</div>` : ""}
     <div class="facts">${d.ticket_token ? `<button class="btn ghost sm" data-dsheet="${esc(d.file_number)}">📄 Pickup sheet</button>` : ""}
       ${["qb", "send"].includes(d.stage) && isOwner() && (d.app_status !== "queued" || d.progi_note) ? `<button class="btn primary sm" data-dsend="${d.id}">📤 Send to Progi</button>` : ""}
@@ -1727,6 +1737,7 @@ async function renderDrop() {
   $("#bQ").value = bf.q;
   let rows = [];
   const load = async () => {
+    if (isManager() && !S.drivers.length) await loadDrivers();
     const { data, error } = await sb.from("dropoffs").select("*").order("call_date", { ascending: false, nullsFirst: false }).limit(2000);
     if (error) { $("#bList").innerHTML = `<div class="empty">${/does not exist|dropoffs/.test(error.message) ? "Drop-off files are not set up yet." : "Couldn't load: " + esc(error.message)}</div>`; return; }
     rows = (data || []).map((d) => ({ ...d, stage: own ? dropStage(d) : (["send", "qb"].includes(dropStage(d)) ? "done" : dropStage(d)),
@@ -1781,6 +1792,7 @@ async function renderDropForm(id) {
     paid: d.paid, amount: d.amount ?? "", hst_included: d.hst_included ?? true, payment_type: d.payment_type || "", cheque_number: d.cheque_number || "", notes: d.notes || "" };
   let pages = [], pdfFile = null;
   const sentBefore = d.app_status === "done" || d.progi_flat_docs > 0 || d.progi_invoice_docs > 0;
+  const mayDSend = isOwner() || !isManager() || !d.driver_id || d.driver_id === S.user.id;   // a manager (e.g. dispatcher) edits other drivers' drop-offs but only Ali sends them
   shell(`<form class="card stack" id="dForm" novalidate>
       <div><b class="mono big">${esc(d.file_number)}</b> <span class="muted">${esc(veh)}</span>
         <div class="muted small">${kmChip(d.distance_km, d.dist_addr)} ${esc(d.pickup_name || "")}${d.pickup_city ? " · " + esc(d.pickup_city) : ""} → ${esc(RECYCLER(d.recycler))}${d.vin ? ` · <span class="mono">${esc(d.vin)}</span>` : ""}</div></div>
@@ -1807,7 +1819,7 @@ async function renderDropForm(id) {
       ${d.instructions && isOwner() ? `<p class="muted small"><b>Progi instructions:</b> ${esc(d.instructions)}</p>` : ""}
       <p class="err-text" id="dErr"></p>
       ${d.progi_note ? `<div class="note warnbox">${esc(d.progi_note)}</div>` : d.app_status === "queued" ? `<p class="muted small">⏳ Being sent to Progi automatically…</p>` : ""}
-      <div class="savebar"><button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send to Progi" : "Done — send to Progi"}</button>
+      <div class="savebar">${mayDSend ? `<button class="btn primary big" type="button" id="dSend">📤 ${isOwner() ? "Save &amp; send to Progi" : "Done — send to Progi"}</button>` : `<span class="muted small">Ali sends it to Progi</span>`}
         ${sentBefore && isOwner() ? "" : `<button class="btn" type="submit" id="dSave">💾 Save</button>`}</div>
       ${sentBefore && isOwner() ? `<p class="muted small">Already sent to Progi before — saving sends whatever Progi is still missing (e.g. the shop invoice).</p>` : ""}
     </form>`, { title: d.file_number, back });
@@ -2724,7 +2736,7 @@ async function renderDetail(id) {
   shell(`<div class="muted">Loading…</div>`, { title: "Pickup", back: () => go(isOwner() ? "dash" : "home") });
   const { data: p, error } = await sb.from("pickups").select("*").eq("id", id).maybeSingle();
   if (error || !p) { $(".main").innerHTML = `<div class="empty">Not found${error ? ": " + esc(error.message) : ""}.</div>`; return; }
-  if (isOwner() && !S.drivers.length) await loadDrivers();
+  if (isManager() && !S.drivers.length) await loadDrivers();
   const dj = isOwner() ? (await sb.from("progi_jobs").select("distance_km, dist_addr").eq("file_number", p.file_number).maybeSingle()).data : null;
   const canEdit = isOwner() || (isManager() && p.progi_status !== "submitted") || (p.driver_id === S.user.id && (isToday(p.recorded_at) || p.progi_status !== "submitted"));
   const veh = [p.year, p.make, p.model].filter(Boolean).join(" ");
@@ -2734,7 +2746,7 @@ async function renderDetail(id) {
       <div class="headrow"><h2 class="mono">${esc(p.file_number)}</h2>${progiPill(p)}${kmChip(dj?.distance_km, dj?.dist_addr)}<button class="btn ghost sm" id="detSheet">📄 Pickup sheet</button>${isOwner() ? (p.qb_status === "done" ? `<span class="pill green">QuickBooks ✓</span>` : p.paid ? `<span class="pill">QB pending</span>` : "") : ""}</div>
       <div>${esc(veh)} · ${esc([p.color, p.vehicle_type, p.drive_type].filter(Boolean).join(" · "))} ${p.burned ? `<span class="pill red">Burned</span>` : ""}</div>
       ${p.vin ? `<div class="mono small">VIN ${esc(p.vin)}</div>` : ""}
-      <div class="muted small">Picked up ${whenLabel(p.picked_up_at || p.recorded_at)} · ${esc(isOwner() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
+      <div class="muted small">Picked up ${whenLabel(p.picked_up_at || p.recorded_at)} · ${esc(isManager() ? driverName(p.driver_id) : S.me.full_name)}${p.shop_name ? " · from " + esc(p.shop_name) : ""}</div>
       <div class="kv">
         <div><small>Payment</small><b>${p.paid ? `${money(p.amount)} ${p.hst_included ? "incl. HST" : "+ HST"}` : "None"}</b>${p.paid ? `<span>${PAY_LABEL[p.payment_type]}${p.card_last4 ? " ••" + esc(p.card_last4) : ""}${p.cheque_number ? " #" + esc(p.cheque_number) : ""}${p.cheque_date ? " · dated " + esc(p.cheque_date) : ""}</span>` : ""}</div>
         <div><small>Extras</small><b>${p.extras?.length ? p.extras.map((x) => EXTRAS.find((e) => e[0] === x)?.[1] + ` (${x})`).join(", ") : "—"}</b></div>
