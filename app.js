@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.43.0";
+const VERSION = "1.43.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1376,7 +1376,7 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
-const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["arrivals", "New arrivals"], ["all", "Reports"]];
+const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["arrivals", "Won cars"], ["all", "Reports"]];
 const STATUS_OPTS = {
   all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
@@ -1596,7 +1596,7 @@ async function renderPickedTab(wrap) {
 
 async function renderDash() {
   if (S.dashTab === "drop") return renderDrop();
-  if (S.dashTab === "arrivals") return renderArrivals();
+  if (S.dashTab === "arrivals") return isOwner() ? renderArrivals() : (S.dashTab = "board", renderBoard());
   if (S.dashTab === "board" || !DASH_TABS.some(([v]) => v === S.dashTab)) { S.dashTab = "board"; return renderBoard(); }
   if (S.dashTab === "picked") {
     shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
@@ -1744,7 +1744,7 @@ async function renderArrivals() {
         <button class="btn primary sm" id="arrSync">🔄 Update from Progi bids</button></div>
       <div id="arrMsg"></div>
       <div id="arrList" class="stack"><div class="muted">Loading…</div></div>
-    </div>`, { title: "New arrivals" });
+    </div>`, { title: "Won cars" });
   wireDashTabs();
   const msg = (html) => { $("#arrMsg").innerHTML = html; };
   const connectHelp = async (why) => {
