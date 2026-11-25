@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.43.3";
+const VERSION = "1.44.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1376,7 +1376,8 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
-const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["arrivals", "Won cars"], ["all", "Reports"]];
+const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["cheques", "Cheques"], ["arrivals", "Won cars"], ["all", "Reports"]];
+const OWNER_TABS = ["cheques", "arrivals"];
 const STATUS_OPTS = {
   all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
@@ -1384,7 +1385,7 @@ const STATUS_OPTS = {
 /** the progi filter that applies on the current dashboard tab */
 const tabProgi = () => S.dashTab === "submitted" ? "submitted" : S.dashTab === "picked" ? (S.filters.pickedProgi || "notsub") : S.filters.progi;
 function dashTabsHtml() {
-  return `<nav class="subtabs" id="dtabs">${DASH_TABS.map(([v, l]) => `<button data-dt="${v}" class="${S.dashTab === v ? "on" : ""}">${l}<span class="cnt" data-cnt="${v}"></span></button>`).join("")}</nav>`;
+  return `<nav class="subtabs" id="dtabs">${DASH_TABS.filter(([v]) => isOwner() || !OWNER_TABS.includes(v)).map(([v, l]) => `<button data-dt="${v}" class="${S.dashTab === v ? "on" : ""}">${l}<span class="cnt" data-cnt="${v}"></span></button>`).join("")}</nav>`;
 }
 function wireDashTabs() {
   $$("#dtabs [data-dt]").forEach((b) => (b.onclick = () => {
@@ -1597,6 +1598,7 @@ async function renderPickedTab(wrap) {
 async function renderDash() {
   if (S.dashTab === "drop") return renderDrop();
   if (S.dashTab === "arrivals") return isOwner() ? renderArrivals() : (S.dashTab = "board", renderBoard());
+  if (S.dashTab === "cheques") return isOwner() ? renderCheques() : (S.dashTab = "board", renderBoard());
   if (S.dashTab === "board" || !DASH_TABS.some(([v]) => v === S.dashTab)) { S.dashTab = "board"; return renderBoard(); }
   if (S.dashTab === "picked") {
     shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
@@ -1719,6 +1721,113 @@ function dropCard(d) {
       ${d.stage === "qb" && isOwner() ? `<button class="btn ghost sm" data-dqb="${d.id}">✓ Already done</button>` : ""}
       <button class="btn ${["topick", "record"].includes(d.stage) ? "primary" : "ghost"} sm" data-dopen="${d.id}">${d.stage === "topick" ? "Record pickup →" : d.stage === "record" ? "Enter dates & invoice →" : "Open"}</button></div>
   </article>`;
+}
+// ─────────────────────────────────────────────────────────────── Cheques (owner): pickups that need a cheque → QuickBooks cheque → PrintBoss
+const CHQ_BANK = "RBC 06032-1101112";
+const torontoDay = (d = new Date()) => d.toLocaleDateString("en-CA", { timeZone: "America/Toronto" });
+async function qboSelect(sel) {
+  const { data } = await sb.auth.getSession();
+  const r = await fetch(SUPABASE_URL.replace(/\/$/, "") + "/functions/v1/qbo-auth", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + data.session.access_token }, body: JSON.stringify({ query: sel }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error("QuickBooks: " + (j.error || j.Fault?.Error?.[0]?.Message || r.status));
+  return j.QueryResponse || {};
+}
+/** payee written in Progi's notes ("CHEQUE TO …", "Provide a cheque to …"), else null */
+function chequePayee(notes) {
+  const m = String(notes || "").match(/che(?:que|ck)s?\s+(?:payable\s+)?to\s*[:\-]?\s*([^\n\/]+)/i);
+  if (!m) return null;
+  return m[1].replace(/\(.*?\)/g, " ").replace(/\*+/g, " ").replace(/\b(very important|exactly that way|confirm(ed)? by.*)$/i, "").replace(/\s+/g, " ").trim().replace(/[.,;:\-]+$/, "").toUpperCase() || null;
+}
+async function renderCheques() {
+  shell(`${dashTabsHtml()}
+    <div class="board">
+      <div class="syncbar"><div class="syncinfo">Open pickups that need a payment to the shop. Pick the date, check the payee, type the cheque number, press <b>Create cheque</b>.</div>
+        <button class="btn ghost sm" id="chqRefresh">↻ Refresh</button></div>
+      <div id="chqList" class="stack"><div class="muted">Loading — reading Progi tickets and QuickBooks…</div></div>
+    </div>`, { title: "Cheques" });
+  wireDashTabs();
+  const today = torontoDay();
+  const money = (n) => "$" + Number(n || 0).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  let rows = [];
+  const draw = () => {
+    if (!rows.length) { $("#chqList").innerHTML = `<div class="empty">No open pickups with a payment to the shop.</div>`; return; }
+    $("#chqList").innerHTML = rows.map((c, i) => {
+      const fees = c.fees.length ? c.fees : [{ date: c.est_date || today, total: c.est_total }];
+      const pick = fees.find((f) => f.date === today) || fees[0];
+      const done = c.pay;
+      const tag = c.overdue ? `<span class="schip st-red">⚠ Overdue (${esc(c.due_date)})</span>`
+        : c.lastDay ? `<span class="schip st-red">⏰ Last day at this price</span>`
+        : c.due_date === today ? `<span class="schip st-red">⏰ Due today</span>` : `<span class="schip">Due ${esc(c.due_date || "?")}</span>`;
+      return `<article class="fcard chq${done ? " chqdone" : ""}" data-i="${i}">
+        <div class="fhead"><b class="mono">${esc(c.file_number)}</b><span class="fveh">${esc([c.year, c.make, c.model].filter(Boolean).join(" "))}</span></div>
+        <div class="fline">${tag} <span class="muted">${esc(c.shop_name || "")} · ${esc(c.shop_city || "")}</span></div>
+        ${c.payeeNote ? "" : `<div class="fline note warnbox small">No "cheque to …" in Progi's notes — maybe card/other. Check before making a cheque.</div>`}
+        ${c.extra ? `<div class="fline note warnbox small">💲 Notes mention a $ amount — Claude checks for an extra invoice to Progi (OAF / dry run / wait time).</div>` : ""}
+        <details class="fline small"><summary class="muted">Progi notes</summary><pre class="chqnotes">${esc(c.instructions || "—")}</pre></details>
+        ${done ? `<div class="fline syncres ok">✓ Cheque in QuickBooks${c.pay.DocNumber ? " #" + esc(c.pay.DocNumber) : ""} · ${money(c.pay.TotalAmt)} to ${esc(c.pay.VendorRef?.name || "")} · ${c.pay.CheckPayment?.PrintStatus === "PrintComplete" ? "printed" : "⏳ waiting for PrintBoss"}</div>`
+        : c.bill ? `<div class="fline note warnbox small">A bill ${esc(c.bill.DocNumber)} (${money(c.bill.TotalAmt)}) is already in QuickBooks without a cheque — tell Claude.</div>`
+        : `<div class="chqform">
+            <label class="field"><span>Pickup date / amount</span><select data-k="fee">${fees.map((f) => `<option value="${esc(f.date)}|${f.total}" ${f === pick ? "selected" : ""}>${esc(f.date)} — ${money(f.total)}</option>`).join("")}</select></label>
+            <label class="field"><span>Pay to (exactly as on the cheque)</span><input data-k="payee" value="${esc(c.payeeNote || c.shop_name || "")}"></label>
+            <label class="field"><span>Cheque number</span><input data-k="num" inputmode="numeric" placeholder="e.g. 10567"></label>
+            <button class="btn primary" data-make="${i}">Create cheque</button>
+          </div>`}
+      </article>`;
+    }).join("");
+    $$("#chqList [data-make]").forEach((b) => (b.onclick = async () => {
+      const c = rows[+b.dataset.make], card = b.closest("article");
+      const [date, amt] = card.querySelector("[data-k=fee]").value.split("|");
+      const payee = card.querySelector("[data-k=payee]").value.trim().replace(/\s+/g, " ");
+      const num = card.querySelector("[data-k=num]").value.trim();
+      if (!payee) return toast("Type who the cheque is to", "err");
+      if (!/^\d{4,6}$/.test(num)) return toast("Type the cheque number", "err");
+      if (!confirm(`Cheque #${num}\n${payee}\n${money(amt)} (pickup ${date})\nFile ${c.file_number}\n\nCreate it in QuickBooks?`)) return;
+      b.disabled = true; b.textContent = "Creating…";
+      try {
+        const j = await arrivalsCall({ action: "shopbill", file_number: c.file_number, shop: payee, date: today, amount: Number(amt), pay_from: CHQ_BANK, print: true });
+        card.querySelector(".chqform").outerHTML = `<div class="fline syncres ok">✓ ${j.made ? "Cheque created" : "Already in QuickBooks"} · ${money(j.total)} to ${esc(j.vendor || payee)}</div>
+          <div class="fline note small"><b>PrintBoss:</b> set the next cheque number to <b>${esc(num)}</b> → <b>Import</b> → <b>Generate</b> → <b>Print</b>. (Or tell Claude “print ${esc(num)}” and he does it and e-mails the PDF.)</div>`;
+        toast("Cheque created ✓", "ok");
+      } catch (e) { b.disabled = false; b.textContent = "Create cheque"; toast(e.message, "err"); }
+    }));
+  };
+  const load = async () => {
+    $("#chqList").innerHTML = `<div class="muted">Loading — reading Progi tickets and QuickBooks…</div>`;
+    const { data, error } = await sb.from("progi_jobs").select("file_number,ticket_token,status,due_date,year,make,model,shop_name,shop_city,instructions,est_total,est_date")
+      .in("status", ["open", "hold"]).gt("est_total", 0).order("due_date").limit(200);
+    if (error) { $("#chqList").innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
+    rows = (data || []).filter((j) => !/insured/i.test(j.shop_name || ""));
+    const tomorrow = torontoDay(new Date(Date.now() + 864e5));
+    await Promise.all(rows.map(async (c) => {
+      c.payeeNote = chequePayee(c.instructions);
+      c.extra = /\$\s*\d|\d\s*\$/.test(c.instructions || "");
+      c.fees = [];
+      try {
+        const t = await (await fetch(`https://tracking.pix.api.progi.com/towing-tickets/token/${c.ticket_token}?locale=en`)).json();
+        c.fees = (t?.fees?.projectedFees || []).map((f) => ({ date: String(f.date).slice(0, 10), total: Number(f.total) })).filter((f) => f.total > 0 && f.date >= today);
+      } catch {}
+      const fT = c.fees.find((f) => f.date === today), fN = c.fees.find((f) => f.date === tomorrow);
+      c.overdue = !!c.due_date && c.due_date < today;
+      c.lastDay = c.due_date === today || (!!fT && !!fN && fN.total > fT.total + 0.005);
+    }));
+    try {
+      const files = rows.map((c) => `'${c.file_number}'`).join(",");
+      if (files) {
+        const bills = (await qboSelect(`select Id, DocNumber, TotalAmt, Balance from Bill where DocNumber in (${files})`)).Bill || [];
+        const since = torontoDay(new Date(Date.now() - 60 * 864e5));
+        const pays = (await qboSelect(`select * from BillPayment where TxnDate >= '${since}' maxresults 1000`)).BillPayment || [];
+        for (const c of rows) {
+          c.bill = bills.find((b) => b.DocNumber === c.file_number) || null;
+          c.pay = c.bill ? pays.find((p) => (p.Line || []).some((l) => (l.LinkedTxn || []).some((x) => x.TxnId === c.bill.Id))) || null : null;
+        }
+      }
+    } catch (e) { toast(e.message, "err"); }
+    const rank = (c) => (c.pay ? 3 : c.overdue ? 0 : c.lastDay ? 1 : 2);
+    rows.sort((a, b) => rank(a) - rank(b) || String(a.due_date).localeCompare(String(b.due_date)));
+    draw();
+  };
+  $("#chqRefresh").onclick = load;
+  await load();
 }
 // ─────────────────────────────────────────────────────────────── New arrivals (owner): cars won on Progi's bid site → matthewsautorecycling.com
 async function arrivalsCall(body) {

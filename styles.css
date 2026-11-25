@@ -488,3 +488,8 @@ body { background: var(--bg); }
 .arrkv { width: 100%; margin-top: 8px; border-collapse: collapse; }
 .arrkv td { padding: 4px 6px; border-top: 1px solid #f0f2f6; }
 .arrkv td:first-child { color: var(--muted); width: 35%; }
+
+/* Cheques tab */
+.chqform { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: end; margin-top: 8px; }
+.chqnotes { white-space: pre-wrap; font: inherit; margin: 6px 0 0; }
+.chq.chqdone { opacity: .75; }
