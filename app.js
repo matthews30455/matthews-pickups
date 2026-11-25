@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.42.0";
+const VERSION = "1.43.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1376,7 +1376,7 @@ window.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [
 window.addEventListener("drop", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); toast("Drop it on Vehicle Photos or Shop Invoice", "err"); } });
 
 // ─────────────────────────────────────────────────────────────── owner dashboard
-const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["all", "Reports"]];
+const DASH_TABS = [["board", "Progi"], ["drop", "Progi drop-off"], ["arrivals", "New arrivals"], ["all", "Reports"]];
 const STATUS_OPTS = {
   all: [["", "Status: all"], ["topick", "To pick up"], ["hold", "On hold in Progi"], ["progi", "Picked up (in Progi)"], ["notsub", "In app – not submitted"], ["queued", "Progi upload queue"], ["submitted", "Submitted to Progi"]],
   picked: [["notsub", "All not submitted"], ["pending", "Not queued yet"], ["queued", "In upload queue"]],
@@ -1596,6 +1596,7 @@ async function renderPickedTab(wrap) {
 
 async function renderDash() {
   if (S.dashTab === "drop") return renderDrop();
+  if (S.dashTab === "arrivals") return renderArrivals();
   if (S.dashTab === "board" || !DASH_TABS.some(([v]) => v === S.dashTab)) { S.dashTab = "board"; return renderBoard(); }
   if (S.dashTab === "picked") {
     shell(`${dashTabsHtml()}<div id="pickedWrap"></div>`, { title: "Dashboard" });
@@ -1718,6 +1719,81 @@ function dropCard(d) {
       ${d.stage === "qb" && isOwner() ? `<button class="btn ghost sm" data-dqb="${d.id}">✓ Already done</button>` : ""}
       <button class="btn ${["topick", "record"].includes(d.stage) ? "primary" : "ghost"} sm" data-dopen="${d.id}">${d.stage === "topick" ? "Record pickup →" : d.stage === "record" ? "Enter dates & invoice →" : "Open"}</button></div>
   </article>`;
+}
+// ─────────────────────────────────────────────────────────────── New arrivals (owner): cars won on Progi's bid site → matthewsautorecycling.com
+async function arrivalsCall(body) {
+  const { data } = await sb.auth.getSession();
+  const r = await fetch(SYNC_FN, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + data.session.access_token }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || "Server " + r.status);
+  return j;
+}
+function arrivalCardHtml(c, live) {
+  const ttl = [c.year, c.make, c.model, c.trim].filter(Boolean).join(" ");
+  const rows = [["Stock #", c.stock], ["Engine", c.engine], ["Odometer", c.odometer_km ? Number(c.odometer_km).toLocaleString("en-CA") + " km" : "—"], ["Colour", c.colour], ["Arrived", c.arrived_on]];
+  return `<div class="arrcard">
+    <div class="arrhead"><b>${esc(ttl)}</b> ${live ? `<span class="schip st-green">🌐 On the website</span>` : `<span class="schip st-amber">👁 Preview — not live yet</span>`}</div>
+    <div class="arrphotos">${(c.photos || []).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" loading="lazy" alt="photo ${i + 1}"${i === 0 ? ' class="main"' : ""}></a>`).join("")}</div>
+    <table class="arrkv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v || "—")}</td></tr>`).join("")}</table>
+  </div>`;
+}
+async function renderArrivals() {
+  shell(`${dashTabsHtml()}
+    <div class="board">
+      <div class="syncbar"><div class="syncinfo">Cars you won on Progi's bid site (last 3 months). Tick <b>Show on website</b> — the card fills itself.</div>
+        <button class="btn primary sm" id="arrSync">🔄 Update from Progi bids</button></div>
+      <div id="arrMsg"></div>
+      <div id="arrList" class="stack"><div class="muted">Loading…</div></div>
+    </div>`, { title: "New arrivals" });
+  wireDashTabs();
+  const msg = (html) => { $("#arrMsg").innerHTML = html; };
+  const connectHelp = async (why) => {
+    const { data: code } = await sb.rpc("progi_connect_code");
+    const bm = `javascript:(async()=>{try{if(!/progi\\.com\\/progipix\\/recycler\\/bid/.test(location.href)){alert('Open the Progi bid site and sign in first, then press this bookmark.');return}const r=await fetch('${SYNC_FN}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bidconnect',code:'${code || ""}',cookie:document.cookie})});const j=await r.json().catch(()=>({}));alert(j.ok?'Connected \\u2713  The app can now read your won vehicles.':'Not connected: '+(j.error||r.status))}catch(e){alert('Error: '+e.message)}})()`;
+    msg(`<section class="card stack"><div class="note warnbox">${esc(why)}</div>
+      <h3>Connect the Progi bid site (one time)</h3>
+      <ol class="steps">
+        <li>On a <b>computer</b>, drag this button to Chrome's bookmarks bar:<br><a class="btn primary bmk" href="${esc(bm)}" onclick="alert('Drag me to the bookmarks bar, then open the Progi bid site and click me there.');return false;">⭐ Connect Bids</a></li>
+        <li>Open Progi → <b>Bids</b> (the bid site) and sign in as usual.</li>
+        <li>Click the <b>⭐ Connect Bids</b> bookmark. You'll see <b>“Connected ✓”</b>.</li>
+        <li>Come back here and press <b>🔄 Update from Progi bids</b>.</li>
+      </ol><p class="muted small">Your password is never stored. If it ever says the link expired, repeat steps 2–3.</p></section>`);
+  };
+  let rows = [];
+  const draw = () => {
+    if (!rows.length) { $("#arrList").innerHTML = `<div class="empty">No won vehicles yet — press 🔄 Update from Progi bids.</div>`; return; }
+    $("#arrList").innerHTML = rows.map((w) => `<article class="fcard">
+      <div class="fhead"><b class="mono">${esc(w.file_number || w.pix_number)}</b><span class="fveh">${esc(w.title || "")}</span></div>
+      <div class="fline muted">${w.keeper ? "🏠 Our yard (we were the keeper)" : "📍 " + esc(w.location || "other yard")}${w.won_on ? " · won " + esc(w.won_on) : ""}</div>
+      <label class="fline arrtick"><input type="checkbox" data-pix="${esc(w.pix_number)}" ${w.show ? "checked" : ""}> <b>Show on website</b></label>
+      <div data-card="${esc(w.pix_number)}">${w.show && w.card ? arrivalCardHtml(w.card, w.publish_note === "live") : ""}</div>
+    </article>`).join("");
+    $$("#arrList [data-pix]").forEach((cb) => (cb.onchange = async () => {
+      const pix = cb.dataset.pix, show = cb.checked, box = $(`[data-card="${pix}"]`);
+      cb.disabled = true;
+      box.innerHTML = `<p class="muted small">${show ? "⏳ Building the card — reading Progi and checking every photo (about 30 seconds)…" : "Removing from the website…"}</p>`;
+      try {
+        const j = await arrivalsCall({ action: "publishcar", pix, show });
+        const w = rows.find((x) => x.pix_number === pix);
+        if (w) { w.show = show; w.card = j.card || null; w.publish_note = show ? (j.live ? "live" : "preview") : null; }
+        box.innerHTML = show ? arrivalCardHtml(j.card, j.live) + (j.left_out?.length ? `<p class="muted small">Left out ${j.left_out.length} photo(s): ${esc(j.left_out.join(" · "))}</p>` : "") : "";
+        toast(show ? (j.live ? "On the website ✓" : "Preview ready ✓") : "Removed from the website ✓", "ok");
+      } catch (e) { cb.checked = !show; box.innerHTML = `<div class="note warnbox">${esc(e.message)}</div>`; if (/not connected|expired/i.test(e.message)) connectHelp(e.message); }
+      cb.disabled = false;
+    }));
+  };
+  const load = async () => {
+    const { data, error } = await sb.from("won_cars").select("*").order("won_on", { ascending: false, nullsFirst: false }).limit(300);
+    if (error) { $("#arrList").innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
+    rows = data || []; draw();
+  };
+  $("#arrSync").onclick = async () => {
+    const b = $("#arrSync"); b.disabled = true; b.textContent = "Updating…";
+    try { const j = await arrivalsCall({ action: "wonsync" }); msg(`<div class="syncres ok">✓ ${j.found} won vehicle(s) found (${j.keeper} from our own yard)</div>`); await load(); }
+    catch (e) { if (/not connected|expired/i.test(e.message)) connectHelp(e.message); else msg(`<div class="syncres bad">⚠️ ${esc(e.message)}</div>`); }
+    b.disabled = false; b.textContent = "🔄 Update from Progi bids";
+  };
+  await load();
 }
 async function renderDrop() {
   const bf = (S.dboard ||= { stage: "all", q: "", limit: 60 });
