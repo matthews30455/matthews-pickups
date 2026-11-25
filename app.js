@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.43.1";
+const VERSION = "1.43.2";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1741,7 +1741,7 @@ async function renderArrivals() {
   shell(`${dashTabsHtml()}
     <div class="board">
       <div class="syncbar"><div class="syncinfo">Cars you won on Progi's bid site (last 3 months). Tick <b>Show on website</b> — the card fills itself.</div>
-        <button class="btn primary sm" id="arrSync">🔄 Update from Progi bids</button></div>
+        <button class="btn primary sm" id="arrSync">🔄 Update from Progi bids</button><button class="btn ghost sm" id="arrRefresh">↻ Refresh</button></div>
       <div id="arrMsg"></div>
       <div id="arrList" class="stack"><div class="muted">Loading…</div></div>
     </div>`, { title: "Won cars" });
@@ -1749,15 +1749,15 @@ async function renderArrivals() {
   const msg = (html) => { $("#arrMsg").innerHTML = html; };
   const connectHelp = async (why) => {
     const { data: code } = await sb.rpc("progi_connect_code");
-    const bm = `javascript:(async()=>{try{if(!/progi\\.com\\/progipix\\/recycler\\/bid/.test(location.href)){alert('Open the Progi bid site and sign in first, then press this bookmark.');return}const r=await fetch('${SYNC_FN}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bidconnect',code:'${code || ""}',cookie:document.cookie})});const j=await r.json().catch(()=>({}));alert(j.ok?'Connected \\u2713  The app can now read your won vehicles.':'Not connected: '+(j.error||r.status))}catch(e){alert('Error: '+e.message)}})()`;
+    const bm = `javascript:(async()=>{try{if(!/progi\\.com\\/progipix\\/recycler\\/bid/.test(location.href)){alert('Open the Progi bid site and sign in first, then press this bookmark.');return}const B='/progipix/recycler/bid/',P=new DOMParser();const L=P.parseFromString(await(await fetch(B+'?action=vehachetes&navl1=opt_myveh&navl2=opt_won&sortorder=DESC&nbr_months=3')).text(),'text/html');const rows=[...L.querySelectorAll('tr[id^=detail_container_]')];if(!rows.length){alert('No won vehicles found - are you signed in to the bid site?');return}const cars=[];for(const r of rows){const pix=r.id.replace('detail_container_','');const ch=[...r.querySelectorAll('.chip')];if(!ch.some(c=>c.textContent.trim()==='Won'&&!c.classList.contains('hide')))continue;const kp=ch.some(c=>/keeper/i.test(c.textContent)&&!c.classList.contains('hide'));const t=r.textContent.replace(/\\s+/g,' ');const ttl=([...r.querySelectorAll('a')].find(a=>/ajaxShowBidBox/.test(a.getAttribute('href')||''))||{}).textContent||'';const d=P.parseFromString(await(await fetch(B,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'action=fiche&nopp='+pix})).text(),'text/html');const ct=(d.querySelector('#content')||d.body).textContent.replace(/\\s+/g,' ');const i=ct.indexOf('Transmission ');cars.push({pix,title:ttl.trim(),keeper:kp,file:(t.match(/ProgiPix:\\s*([A-Z0-9]{2}-[A-Z0-9]+)/)||[])[1]||'',loc:(t.match(/Location\\s+(.+?,\\s*[A-Z]{2})\\b/)||[])[1]||'',ends:(t.match(/Ends on:\\s*(.+?)\\s+(Quick bid|Bid:)/)||[])[1]||'',spec:(i<0?'':ct.slice(i,i+1200)).replace(/VIN\\s+\\w{11,17}/g,''),photos:[...new Set([...d.querySelectorAll('[id^=vpx-fsphoto_] a[href]')].map(a=>a.href))].slice(0,20)})}const res=await fetch('${SYNC_FN}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bidimport',code:'${code || ""}',cars})});const j=await res.json().catch(()=>({}));alert(j.ok?'Updated \\u2713  '+j.saved+' won car(s) sent to the app.':'Not updated: '+(j.error||res.status))}catch(e){alert('Error: '+e.message)}})()`;
     msg(`<section class="card stack"><div class="note warnbox">${esc(why)}</div>
-      <h3>Connect the Progi bid site (one time)</h3>
+      <h3>Update the won list from the Progi bid site</h3>
       <ol class="steps">
-        <li>On a <b>computer</b>, drag this button to Chrome's bookmarks bar:<br><a class="btn primary bmk" href="${esc(bm)}" onclick="alert('Drag me to the bookmarks bar, then open the Progi bid site and click me there.');return false;">⭐ Connect Bids</a></li>
+        <li>On a <b>computer</b>, drag this button to Chrome's bookmarks bar:<br><a class="btn primary bmk" href="${esc(bm)}" onclick="alert('Drag me to the bookmarks bar, then open the Progi bid site and click me there.');return false;">⭐ Update Won cars</a><br><span class="muted small">(delete the old ⭐ Connect Bids bookmark — this one replaces it)</span></li>
         <li>Open Progi → <b>Bids</b> (the bid site) and sign in as usual.</li>
-        <li>Click the <b>⭐ Connect Bids</b> bookmark. You'll see <b>“Connected ✓”</b>.</li>
-        <li>Come back here and press <b>🔄 Update from Progi bids</b>.</li>
-      </ol><p class="muted small">Your password is never stored. If it ever says the link expired, repeat steps 2–3.</p></section>`);
+        <li>Click the <b>⭐ Update Won cars</b> bookmark. It reads your won vehicles (about 30 seconds) and says <b>“Updated ✓”</b>.</li>
+        <li>Come back here and press <b>↻ Refresh</b>. Do steps 2–3 again whenever you win new cars.</li>
+      </ol><p class="muted small">Your password is never stored — your own signed-in browser reads the bid site and sends only the won cars.</p></section>`);
   };
   let rows = [];
   const draw = () => {
@@ -1789,10 +1789,10 @@ async function renderArrivals() {
   };
   $("#arrSync").onclick = async () => {
     const b = $("#arrSync"); b.disabled = true; b.textContent = "Updating…";
-    try { const j = await arrivalsCall({ action: "wonsync" }); msg(`<div class="syncres ok">✓ ${j.found} won vehicle(s) found (${j.keeper} from our own yard)</div>`); await load(); }
-    catch (e) { if (/not connected|expired/i.test(e.message)) connectHelp(e.message); else msg(`<div class="syncres bad">⚠️ ${esc(e.message)}</div>`); }
+    await connectHelp("The list comes from the Progi bid site through the ⭐ Update Won cars bookmark (steps below).");
     b.disabled = false; b.textContent = "🔄 Update from Progi bids";
   };
+  $("#arrRefresh").onclick = load;
   await load();
 }
 async function renderDrop() {
