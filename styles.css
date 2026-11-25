@@ -478,6 +478,7 @@ body { background: var(--bg); }
 /* New arrivals (website cards) */
 .arrtick { display: flex; align-items: center; gap: 8px; font-size: 1rem; cursor: pointer; }
 .arrtick input { width: 22px; height: 22px; }
+.arrthumb { width: 100%; max-height: 220px; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; display: block; margin-bottom: 8px; }
 .arrcard { border: 1px solid #e3e6ee; border-radius: 12px; padding: 10px; margin-top: 8px; background: #fff; }
 .arrhead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .arrphotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }

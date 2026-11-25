@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.43.2";
+const VERSION = "1.43.3";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1730,11 +1730,11 @@ async function arrivalsCall(body) {
 }
 function arrivalCardHtml(c, live) {
   const ttl = [c.year, c.make, c.model, c.trim].filter(Boolean).join(" ");
-  const rows = [["Stock #", c.stock], ["Engine", c.engine], ["Odometer", c.odometer_km ? Number(c.odometer_km).toLocaleString("en-CA") + " km" : "—"], ["Colour", c.colour], ["Arrived", c.arrived_on]];
+  const rows = [["Stock #", c.stock], ["Engine", c.engine], ["Odometer", c.odometer_km ? Number(c.odometer_km).toLocaleString("en-CA") + " km" : "Unknown"], ["Colour", c.colour], ["Arrived", c.arrived_on]];
   return `<div class="arrcard">
     <div class="arrhead"><b>${esc(ttl)}</b> ${live ? `<span class="schip st-green">🌐 On the website</span>` : `<span class="schip st-amber">👁 Preview — not live yet</span>`}</div>
     <div class="arrphotos">${(c.photos || []).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" loading="lazy" alt="photo ${i + 1}"${i === 0 ? ' class="main"' : ""}></a>`).join("")}</div>
-    <table class="arrkv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v || "—")}</td></tr>`).join("")}</table>
+    <table class="arrkv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v || "Unknown")}</td></tr>`).join("")}</table>
   </div>`;
 }
 async function renderArrivals() {
@@ -1763,6 +1763,7 @@ async function renderArrivals() {
   const draw = () => {
     if (!rows.length) { $("#arrList").innerHTML = `<div class="empty">No won vehicles yet — press 🔄 Update from Progi bids.</div>`; return; }
     $("#arrList").innerHTML = rows.map((w) => `<article class="fcard">
+      ${w.raw?.photos?.[0] ? `<img class="arrthumb" src="${esc(w.raw.photos[0])}" loading="lazy" alt="">` : ""}
       <div class="fhead"><b class="mono">${esc(w.file_number || w.pix_number)}</b><span class="fveh">${esc(w.title || "")}</span></div>
       <div class="fline muted">${w.keeper ? "🏠 Our yard (we were the keeper)" : "📍 " + esc(w.location || "other yard")}${w.won_on ? " · won " + esc(w.won_on) : ""}</div>
       <label class="fline arrtick"><input type="checkbox" data-pix="${esc(w.pix_number)}" ${w.show ? "checked" : ""}> <b>Show on website</b></label>
