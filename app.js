@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.45.0";
+const VERSION = "1.45.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1803,7 +1803,7 @@ async function renderCheques() {
       .in("status", ["open", "hold"]).gt("est_total", 0).order("due_date").limit(200);
     if (error) { $("#chqList").innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
     // drop-offs too; a pickup that Progi turned into a drop-off (same VIN) is shown — and paid — under the NEW drop-off number
-    const { data: drops } = await sb.from("dropoffs").select("file_number,vin,ticket_token,app_status,due_date,year,make,model,pickup_name,pickup_city,instructions").neq("app_status", "done").limit(300);
+    const { data: drops } = await sb.from("dropoffs").select("file_number,vin,ticket_token,app_status,due_date,year,make,model,pickup_name,pickup_city,instructions").neq("app_status", "done").not("progi_status", "in", "(Delivered,Cancelled,Canceled)").limit(300);
     const dropRows = (drops || []).filter((d) => d.ticket_token && !/insured/i.test(d.pickup_name || "")).map((d) => ({ file_number: d.file_number, vin: d.vin, ticket_token: d.ticket_token, due_date: d.due_date,
       year: d.year, make: d.make, model: d.model, shop_name: d.pickup_name, shop_city: d.pickup_city, instructions: d.instructions, est_total: null, est_date: null, drop: true }));
     const vins = [...new Set(dropRows.map((d) => String(d.vin || "").toUpperCase()).filter(Boolean))];
