@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.44.0";
+const VERSION = "1.44.1";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1746,7 +1746,7 @@ async function renderCheques() {
       <div id="chqList" class="stack"><div class="muted">Loading — reading Progi tickets and QuickBooks…</div></div>
     </div>`, { title: "Cheques" });
   wireDashTabs();
-  const today = torontoDay();
+  const today = torontoDay(), tomorrow = torontoDay(new Date(Date.now() + 864e5));
   const money = (n) => "$" + Number(n || 0).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   let rows = [];
   const draw = () => {
@@ -1755,12 +1755,17 @@ async function renderCheques() {
       const fees = c.fees.length ? c.fees : [{ date: c.est_date || today, total: c.est_total }];
       const pick = fees.find((f) => f.date === today) || fees[0];
       const done = c.pay;
-      const tag = c.overdue ? `<span class="schip st-red">⚠ Overdue (${esc(c.due_date)})</span>`
-        : c.lastDay ? `<span class="schip st-red">⏰ Last day at this price</span>`
-        : c.due_date === today ? `<span class="schip st-red">⏰ Due today</span>` : `<span class="schip">Due ${esc(c.due_date || "?")}</span>`;
+      const nice = (d) => d ? new Date(d + "T12:00:00").toLocaleDateString("en-CA", { weekday: "short", month: "short", day: "numeric" }) : "?";
+      const tag = c.overdue ? `<span class="schip st-red">⚠ Overdue — was due ${esc(nice(c.due_date))}</span>`
+        : c.due_date === today ? `<span class="schip st-red">📅 Last day: today (${esc(nice(c.due_date))})</span>`
+        : c.due_date === tomorrow ? `<span class="schip st-amber">📅 Pick up by tomorrow (${esc(nice(c.due_date))})</span>`
+        : `<span class="schip">📅 Pick up by ${esc(nice(c.due_date))}</span>`;
+      const fT = fees.find((f) => f.date === today), fN = fees.find((f) => f.date === tomorrow);
+      const up = fT && fN && fN.total > fT.total + 0.005 ? `<div class="fline small muted">💲 Today ${money(fT.total)} → tomorrow ${money(fN.total)} (storage adds up daily). Pick the date the driver will pick it up.</div>` : "";
       return `<article class="fcard chq${done ? " chqdone" : ""}" data-i="${i}">
         <div class="fhead"><b class="mono">${esc(c.file_number)}</b><span class="fveh">${esc([c.year, c.make, c.model].filter(Boolean).join(" "))}</span></div>
         <div class="fline">${tag} <span class="muted">${esc(c.shop_name || "")} · ${esc(c.shop_city || "")}</span></div>
+        ${done ? "" : up}
         ${c.payeeNote ? "" : `<div class="fline note warnbox small">No "cheque to …" in Progi's notes — maybe card/other. Check before making a cheque.</div>`}
         ${c.extra ? `<div class="fline note warnbox small">💲 Notes mention a $ amount — Claude checks for an extra invoice to Progi (OAF / dry run / wait time).</div>` : ""}
         <details class="fline small"><summary class="muted">Progi notes</summary><pre class="chqnotes">${esc(c.instructions || "—")}</pre></details>
@@ -1822,7 +1827,7 @@ async function renderCheques() {
         }
       }
     } catch (e) { toast(e.message, "err"); }
-    const rank = (c) => (c.pay ? 3 : c.overdue ? 0 : c.lastDay ? 1 : 2);
+    const rank = (c) => (c.pay ? 3 : c.overdue ? 0 : c.due_date === today ? 1 : 2);
     rows.sort((a, b) => rank(a) - rank(b) || String(a.due_date).localeCompare(String(b.due_date)));
     draw();
   };

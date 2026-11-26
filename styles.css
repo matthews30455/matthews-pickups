@@ -491,5 +491,6 @@ body { background: var(--bg); }
 
 /* Cheques tab */
 .chqform { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: end; margin-top: 8px; }
+.chqform .field:first-child { grid-column: 1 / -1; }
 .chqnotes { white-space: pre-wrap; font: inherit; margin: 6px 0 0; }
 .chq.chqdone { opacity: .75; }
