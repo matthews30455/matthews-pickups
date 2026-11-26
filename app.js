@@ -3,7 +3,7 @@ import { outbox } from "./queue.js";
 import { compressPhoto, scanInvoice, rotateCanvas, buildPdf, thumb, preloadPdf, loadImage, plainCanvas } from "./scan.js";
 
 // ─────────────────────────────────────────────────────────────── constants
-const VERSION = "1.44.1";
+const VERSION = "1.45.0";
 const TZ = "America/Toronto";
 const BUCKET = "pickups";
 const VEHICLE_TYPES = ["Car", "SUV", "Pickup", "Van", "Truck", "Motorcycle", "Other"];
@@ -1765,6 +1765,7 @@ async function renderCheques() {
       return `<article class="fcard chq${done ? " chqdone" : ""}" data-i="${i}">
         <div class="fhead"><b class="mono">${esc(c.file_number)}</b><span class="fveh">${esc([c.year, c.make, c.model].filter(Boolean).join(" "))}</span></div>
         <div class="fline">${tag} <span class="muted">${esc(c.shop_name || "")} · ${esc(c.shop_city || "")}</span></div>
+        ${c.drop ? `<div class="fline small"><span class="schip">🚚 Drop-off</span>${c.was ? ` <span class="muted">was pickup ${esc(c.was)} — cheque uses the new number</span>` : ""}</div>` : ""}
         ${done ? "" : up}
         ${c.payeeNote ? "" : `<div class="fline note warnbox small">No "cheque to …" in Progi's notes — maybe card/other. Check before making a cheque.</div>`}
         ${c.extra ? `<div class="fline note warnbox small">💲 Notes mention a $ amount — Claude checks for an extra invoice to Progi (OAF / dry run / wait time).</div>` : ""}
@@ -1798,10 +1799,20 @@ async function renderCheques() {
   };
   const load = async () => {
     $("#chqList").innerHTML = `<div class="muted">Loading — reading Progi tickets and QuickBooks…</div>`;
-    const { data, error } = await sb.from("progi_jobs").select("file_number,ticket_token,status,due_date,year,make,model,shop_name,shop_city,instructions,est_total,est_date")
+    const { data, error } = await sb.from("progi_jobs").select("file_number,vin,ticket_token,status,due_date,year,make,model,shop_name,shop_city,instructions,est_total,est_date")
       .in("status", ["open", "hold"]).gt("est_total", 0).order("due_date").limit(200);
     if (error) { $("#chqList").innerHTML = `<div class="empty">Couldn't load: ${esc(error.message)}</div>`; return; }
-    rows = (data || []).filter((j) => !/insured/i.test(j.shop_name || ""));
+    // drop-offs too; a pickup that Progi turned into a drop-off (same VIN) is shown — and paid — under the NEW drop-off number
+    const { data: drops } = await sb.from("dropoffs").select("file_number,vin,ticket_token,app_status,due_date,year,make,model,pickup_name,pickup_city,instructions").neq("app_status", "done").limit(300);
+    const dropRows = (drops || []).filter((d) => d.ticket_token && !/insured/i.test(d.pickup_name || "")).map((d) => ({ file_number: d.file_number, vin: d.vin, ticket_token: d.ticket_token, due_date: d.due_date,
+      year: d.year, make: d.make, model: d.model, shop_name: d.pickup_name, shop_city: d.pickup_city, instructions: d.instructions, est_total: null, est_date: null, drop: true }));
+    const vins = [...new Set(dropRows.map((d) => String(d.vin || "").toUpperCase()).filter(Boolean))];
+    if (vins.length) {
+      const { data: old } = await sb.from("progi_jobs").select("file_number,vin").in("vin", vins);
+      for (const d of dropRows) { const o = (old || []).find((j) => String(j.vin || "").toUpperCase() === String(d.vin || "").toUpperCase() && j.file_number !== d.file_number); if (o) d.was = o.file_number; }
+    }
+    const dropVins = new Set(vins);
+    rows = (data || []).filter((j) => !/insured/i.test(j.shop_name || "") && !dropVins.has(String(j.vin || "").toUpperCase())).concat(dropRows);
     const tomorrow = torontoDay(new Date(Date.now() + 864e5));
     await Promise.all(rows.map(async (c) => {
       c.payeeNote = chequePayee(c.instructions);
@@ -1815,10 +1826,17 @@ async function renderCheques() {
       c.overdue = !!c.due_date && c.due_date < today;
       c.lastDay = c.due_date === today || (!!fT && !!fN && fN.total > fT.total + 0.005);
     }));
+    rows = rows.filter((c) => c.fees.length || Number(c.est_total) > 0 || c.was);      // drop-offs with nothing to pay to the shop are left out
     try {
-      const files = rows.map((c) => `'${c.file_number}'`).join(",");
+      const files = rows.flatMap((c) => [c.file_number, c.was].filter(Boolean)).map((f) => `'${f}'`).join(",");
       if (files) {
-        const bills = (await qboSelect(`select Id, DocNumber, TotalAmt, Balance from Bill where DocNumber in (${files})`)).Bill || [];
+        let bills = (await qboSelect(`select Id, DocNumber, TotalAmt, Balance from Bill where DocNumber in (${files})`)).Bill || [];
+        let moved = 0;
+        for (const c of rows.filter((c) => c.was && bills.some((b) => b.DocNumber === c.was) && !bills.some((b) => b.DocNumber === c.file_number))) {
+          try { await arrivalsCall({ action: "billrename", from: c.was, to: c.file_number }); moved++; toast(`Bill + cheque moved ${c.was} → ${c.file_number}`, "ok"); }
+          catch (e) { toast(`${c.was} → ${c.file_number}: ${e.message}`, "err"); }
+        }
+        if (moved) bills = (await qboSelect(`select Id, DocNumber, TotalAmt, Balance from Bill where DocNumber in (${files})`)).Bill || [];
         const since = torontoDay(new Date(Date.now() - 60 * 864e5));
         const pays = (await qboSelect(`select * from BillPayment where TxnDate >= '${since}' maxresults 1000`)).BillPayment || [];
         for (const c of rows) {
